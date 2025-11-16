@@ -32,15 +32,27 @@ python main_pipeline.py build --force --llm-clean
 
 **Другие модели OpenRouter:**
 ```bash
-# Другие бесплатные модели
+# Бесплатные модели
+export LLM_API_MODEL=tngtech/deepseek-r1t2-chimera:free  # по умолчанию
 export LLM_API_MODEL=meta-llama/llama-3.2-3b-instruct:free
 export LLM_API_MODEL=google/gemma-2-2b-it:free
+export LLM_API_MODEL=openrouter/sherlock-think-alpha  # бесплатно, 1.8M контекст, reasoning модель
 
 # Платные, но быстрые
 export LLM_API_MODEL=openai/gpt-4o-mini
 export LLM_API_MODEL=anthropic/claude-3-haiku
 ```
 Полный каталог: https://openrouter.ai/models
+
+**Пример использования Sherlock Think Alpha:**
+```bash
+export LLM_MODE=api
+export LLM_API_MODEL=openrouter/sherlock-think-alpha  # reasoning модель с 1.8M контекстом
+export OPENROUTER_API_KEY=sk-or-v1-...
+export LLM_API_MAX_WORKERS=10
+
+python main_pipeline.py build --force --llm-clean
+```
 
 ## Build базы знаний
 ```bash

@@ -155,7 +155,12 @@ LLM_N_THREADS = 16  # увеличено для CPU части (было 8, бо
 LLM_API_PROVIDER = "openrouter"  # только OpenRouter
 LLM_API_MODEL = os.environ.get("LLM_API_MODEL", "tngtech/deepseek-r1t2-chimera:free")  # бесплатная модель по умолчанию
 # Другие модели OpenRouter: https://openrouter.ai/models
-# Примеры: "openai/gpt-4o-mini", "anthropic/claude-3-haiku", "meta-llama/llama-3.2-3b-instruct:free"
+# Примеры:
+#   "tngtech/deepseek-r1t2-chimera:free" - бесплатно, быстро
+#   "openrouter/sherlock-think-alpha" - бесплатно, reasoning модель, 1.8M контекст
+#   "openai/gpt-4o-mini" - платно, быстро
+#   "anthropic/claude-3-haiku" - платно, качественно
+#   "meta-llama/llama-3.2-3b-instruct:free" - бесплатно, маленькая модель
 
 # API ключ (ОБЯЗАТЕЛЕН - OpenRouter требует ключ даже для бесплатных моделей)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")  # получи бесплатный ключ на https://openrouter.ai/keys
