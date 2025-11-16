@@ -15,6 +15,7 @@ from llama_cpp import Llama
 from tqdm import tqdm
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import Dict, Optional
 import logging
@@ -54,6 +55,11 @@ class LLMDocumentCleaner:
         self.model_path = model_path
         self.verbose = verbose
         self.llm = None
+        
+        # Простой кэш для похожих документов (по хэшу текста)
+        # Кэшируем только последние 100 результатов для экономии памяти
+        self._cache = {}
+        self._cache_max_size = 100
 
         # Отдельный логгер для хранения результатов работы LLM
         # (чтобы можно было анализировать, что именно вернула модель)
@@ -139,6 +145,65 @@ class LLMDocumentCleaner:
         if self.verbose:
             print(f"✅ Модель загружена!")
 
+    def _preprocess_text_before_llm(self, text: str) -> str:
+        """
+        Агрессивная предобработка текста перед LLM для ускорения.
+        Удаляет очевидный мусор через regex, чтобы сократить контекст для LLM.
+        
+        Args:
+            text: исходный текст
+            
+        Returns:
+            предобработанный текст
+        """
+        if not text:
+            return ""
+        
+        # Паттерны для удаления очевидного мусора
+        patterns_to_remove = [
+            # Навигация и меню
+            r'(?i)(главная|назад|вверх|поделиться|следите за нами|подписаться)',
+            r'(?i)(меню|навигация|breadcrumb|хлебные крошки)',
+            
+            # Футеры и копирайты
+            r'©\s*\d{4}[-\s]*\d{4}.*?',
+            r'(?i)(все права защищены|лицензия|лицензия цб рф)',
+            r'(?i)(юридический адрес|офис|контакты).*?(?=\n\n|\Z)',
+            
+            # Реклама и призывы к действию
+            r'(?i)(откройте карту сегодня|узнайте больше|оставьте заявку|оформить онлайн)',
+            r'(?i)(скачать приложение|app store|google play)',
+            r'(?i)(подпишитесь|рассылка|новости)',
+            
+            # Cookie и баннеры
+            r'(?i)(cookie|cookies|использование cookie)',
+            r'(?i)(согласие на обработку|политика конфиденциальности)',
+            
+            # Технические блоки
+            r'(?i)(нажмите здесь|перейдите по ссылке|смотрите также|читайте также)',
+            r'(?i)(подробнее|детали|узнать больше)',
+            
+            # Повторяющиеся разделители
+            r'[-=]{3,}',
+            r'_{3,}',
+            
+            # Множественные переносы строк
+            r'\n{3,}',
+        ]
+        
+        # Удаляем паттерны
+        for pattern in patterns_to_remove:
+            text = re.sub(pattern, ' ', text, flags=re.MULTILINE)
+        
+        # Удаляем HTML теги (если остались)
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Нормализуем пробелы
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        return text
+
     def clean_document(self, text: str) -> Dict:
         """
         Очистка одного документа через LLM
@@ -160,8 +225,24 @@ class LLMDocumentCleaner:
         if self.llm is None:
             self.load_model()
 
+        # Агрессивная предобработка перед LLM (удаляем очевидный мусор)
+        text_preprocessed = self._preprocess_text_before_llm(text)
+        
+        # Пропускаем очень короткие документы (после предобработки) - экономим время LLM
+        if len(text_preprocessed.strip()) < 100:
+            fallback = self._fallback_result(text_preprocessed)
+            self._log_llm_result(fallback, original_text=text, reason="too_short_after_preprocessing")
+            return fallback
+        
+        # Проверяем кэш (по хэшу предобработанного текста)
+        text_hash = hashlib.md5(text_preprocessed[:2000].encode('utf-8')).hexdigest()
+        if text_hash in self._cache:
+            cached_result = self._cache[text_hash].copy()
+            self._log_llm_result(cached_result, original_text=text, reason="cached")
+            return cached_result
+        
         # Ограничиваем длину для контекста (уменьшено для ускорения)
-        text_truncated = text[:3000]  # было 4000, уменьшено для ускорения
+        text_truncated = text_preprocessed[:2500]  # было 3000, уменьшено т.к. уже предобработано
 
         # Сокращенный промпт для ускорения (убраны избыточные пояснения)
         prompt = f"""Очисти банковский документ и верни JSON:
@@ -252,6 +333,13 @@ JSON:
                 raw_result.setdefault("conditions", [])
                 # derive is_useful по прежней логике (порог ~0.3)
                 raw_result["is_useful"] = bool(raw_result.get("usefulness_score", 0.5) >= 0.3)
+
+                # Сохраняем в кэш (ограничиваем размер)
+                if len(self._cache) >= self._cache_max_size:
+                    # Удаляем самый старый элемент (FIFO)
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                self._cache[text_hash] = raw_result.copy()
 
                 # Логируем результат в отдельный лог-файл (без лишнего шума)
                 self._log_llm_result(raw_result, original_text=text_truncated)

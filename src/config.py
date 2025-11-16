@@ -36,6 +36,11 @@ PARENT_CHILD_OVERLAP = 20  # перекрытие между чанками
 CSV_CHUNKSIZE = int(os.environ.get("CSV_CHUNKSIZE", "10"))  # сколько строк CSV читать за раз при обработке (маленький для LLM)
 CSV_COUNT_CHUNKSIZE = int(os.environ.get("CSV_COUNT_CHUNKSIZE", "50000"))  # chunksize для быстрого подсчета документов
 
+# Параметры параллельной обработки
+#    export LLM_PARALLEL_WORKERS=4
+LLM_PARALLEL_WORKERS = int(os.environ.get("LLM_PARALLEL_WORKERS", "1"))  # количество параллельных воркеров для LLM (1 = последовательно, 2-4 = параллельно)
+# ВНИМАНИЕ: параллельная обработка LLM требует много VRAM! Для A100 80GB можно использовать 2-3 воркера
+
 # Параметры embedding модели
 # A100 80GB оптимизация: используем BGE-M3 - лучшую multilingual модель
 EMBEDDING_MODEL = "BAAI/bge-m3"  #  (1024 dim, hybrid retrieval)

@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import List, Dict, Optional, Union
 import gc
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.preprocessing import TextPreprocessor
 from src.chunking import DocumentChunker
 from src.logger import get_logger, log_timing
-from src.config import CSV_CHUNKSIZE, CSV_COUNT_CHUNKSIZE
+from src.config import CSV_CHUNKSIZE, CSV_COUNT_CHUNKSIZE, LLM_PARALLEL_WORKERS
 
 try:
     import torch
@@ -77,6 +78,29 @@ class StreamingDocumentProcessor:
                 self.llm_clean_failed = True
                 # НЕ меняем self.llm_clean на False, чтобы показать правильное сообщение
 
+    def _preprocess_and_chunk(self, doc_row: pd.Series) -> tuple:
+        """
+        Предобработка и чанкинг (можно выполнять параллельно).
+        Возвращает (processed_text, doc_row) для дальнейшей LLM обработки.
+        
+        Args:
+            doc_row: строка из CSV
+            
+        Returns:
+            (processed_text, doc_row) или (None, None) если документ слишком короткий
+        """
+        # 1. Предобработка
+        processed_text = self.preprocessor.preprocess_document(
+            text=doc_row.get('text', ''),
+            title=doc_row.get('title', ''),
+            apply_lemmatization=False
+        )
+
+        if not processed_text or len(processed_text.strip()) < 10:
+            return (None, None)
+        
+        return (processed_text, doc_row)
+
     def process_document(self, doc_row: pd.Series) -> List[Dict]:
         """
         Обработка одного документа: preprocess → llm_clean → chunk
@@ -98,7 +122,7 @@ class StreamingDocumentProcessor:
             # Слишком короткий текст - пропускаем
             return []
 
-        # 2. LLM очистка (если включена)
+        # 2. LLM очистка (если включена) - ВСЕГДА последовательно (llama-cpp не thread-safe)
         entities = ''
         topics = ''
 
@@ -242,57 +266,199 @@ class StreamingDocumentProcessor:
             bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
         )
 
+        # Гибридный подход: предобработка параллельно, LLM последовательно
+        # llama-cpp не thread-safe, поэтому LLM вызовы должны быть последовательными
+        use_parallel_preprocessing = LLM_PARALLEL_WORKERS > 1
+        
         try:
             for csv_chunk_idx, doc_chunk_df in enumerate(csv_reader):
                 self.logger.info(f"\n[Батч CSV {csv_chunk_idx + 1}] Обработка {len(doc_chunk_df)} документов...")
 
-                for idx, doc_row in doc_chunk_df.iterrows():
-                    # Обработка одного документа
-                    doc_chunks = self.process_document(doc_row)
-
-                    if doc_chunks:
-                        chunk_batch.extend(doc_chunks)
-                        total_chunks_created += len(doc_chunks)
-                    else:
-                        total_docs_filtered += 1
-
-                    total_docs_processed += 1
+                if use_parallel_preprocessing and self.llm_clean:
+                    # Гибридный режим: предобработка параллельно, LLM последовательно
+                    # 1. Параллельная предобработка всех документов в батче
+                    preprocessed_docs = []
+                    with ThreadPoolExecutor(max_workers=LLM_PARALLEL_WORKERS) as executor:
+                        futures = {executor.submit(self._preprocess_and_chunk, doc_row): idx 
+                                  for idx, doc_row in doc_chunk_df.iterrows()}
+                        
+                        for future in as_completed(futures):
+                            idx = futures[future]
+                            try:
+                                processed_text, doc_row = future.result()
+                                if processed_text is not None:
+                                    preprocessed_docs.append((processed_text, doc_row))
+                            except Exception as e:
+                                self.logger.debug(f"Ошибка предобработки документа {idx}: {e}")
                     
-                    # Обновляем прогресс-бар
-                    pbar.update(1)
-                    pbar.set_postfix({
-                        'чанков': total_chunks_created,
-                        'отфильтр.': total_docs_filtered,
-                        'батчей': batches_indexed
-                    })
-
-                    # Если накопили достаточно чанков для батча
-                    if len(chunk_batch) >= self.chunk_batch_size:
-                        # Конвертируем в DataFrame
-                        batch_df = pd.DataFrame(chunk_batch)
-
-                        if for_weaviate and indexer is not None:
-                            # Weaviate: индексируем сразу
-                            self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
-
-                            with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
-                                indexer.index_documents(batch_df, show_progress=False)
-
-                            batches_indexed += 1
-
-                            # Для Weaviate: сохраняем метаданные чанков (без эмбеддингов)
-                            all_chunks.extend(chunk_batch)
-
-                            # Очищаем батч из памяти
-                            chunk_batch = []
-                            del batch_df
-
-                            # Чистим GPU память
-                            gc.collect()
-                            if TORCH_AVAILABLE and torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                    # 2. Последовательная LLM обработка предобработанных документов
+                    for processed_text, doc_row in preprocessed_docs:
+                        # LLM очистка (последовательно)
+                        entities = ''
+                        topics = ''
+                        
+                        try:
+                            cleaned_result = self.llm_cleaner.clean_document(processed_text)
+                            usefulness = cleaned_result.get('usefulness_score', 1.0)
+                            is_useful = cleaned_result.get('is_useful', True)
+                            
+                            if is_useful and usefulness >= self.min_usefulness:
+                                processed_text = cleaned_result.get('clean_text', processed_text)
+                                products = cleaned_result.get('products', [])
+                                actions = cleaned_result.get('actions', [])
+                                conditions = cleaned_result.get('conditions', [])
+                                all_entities = products + actions + conditions
+                                if all_entities:
+                                    entities = json.dumps(all_entities, ensure_ascii=False)
+                                topics_list = cleaned_result.get('topics', [])
+                                if topics_list:
+                                    topics = json.dumps(topics_list, ensure_ascii=False)
+                            else:
+                                total_docs_filtered += 1
+                                total_docs_processed += 1
+                                pbar.update(1)
+                                continue
+                        except Exception as e:
+                            self.logger.debug(f"Ошибка LLM для web_id={doc_row.get('web_id')}: {e}")
+                        
+                        # Чанкинг
+                        doc_chunks = self.chunker.chunk_by_words(
+                            text=processed_text,
+                            web_id=int(doc_row.get('web_id', 0)),
+                            title=str(doc_row.get('title', '')),
+                            url=str(doc_row.get('url', '')),
+                            kind=str(doc_row.get('kind', '')),
+                            entities=entities,
+                            topics=topics
+                        )
+                        
+                        if doc_chunks:
+                            chunk_batch.extend(doc_chunks)
+                            total_chunks_created += len(doc_chunks)
                         else:
-                            raise RuntimeError("Ожидался режим Weaviate с активным indexer")
+                            total_docs_filtered += 1
+                        
+                        total_docs_processed += 1
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'чанков': total_chunks_created,
+                            'отфильтр.': total_docs_filtered,
+                            'батчей': batches_indexed
+                        })
+                        
+                        # Если накопили достаточно чанков для батча
+                        if len(chunk_batch) >= self.chunk_batch_size:
+                            batch_df = pd.DataFrame(chunk_batch)
+                            
+                            if for_weaviate and indexer is not None:
+                                self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
+                                
+                                with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
+                                    indexer.index_documents(batch_df, show_progress=False)
+                                
+                                batches_indexed += 1
+                                all_chunks.extend(chunk_batch)
+                                chunk_batch = []
+                                del batch_df
+                                gc.collect()
+                                if TORCH_AVAILABLE and torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                
+                elif use_parallel_preprocessing and not self.llm_clean:
+                    # Полностью параллельная обработка (без LLM)
+                    with ThreadPoolExecutor(max_workers=LLM_PARALLEL_WORKERS) as executor:
+                        futures = {executor.submit(self.process_document, doc_row): idx 
+                                  for idx, doc_row in doc_chunk_df.iterrows()}
+                        
+                        for future in as_completed(futures):
+                            idx = futures[future]
+                            try:
+                                doc_chunks = future.result()
+                                
+                                if doc_chunks:
+                                    chunk_batch.extend(doc_chunks)
+                                    total_chunks_created += len(doc_chunks)
+                                else:
+                                    total_docs_filtered += 1
+                                
+                                total_docs_processed += 1
+                                pbar.update(1)
+                                pbar.set_postfix({
+                                    'чанков': total_chunks_created,
+                                    'отфильтр.': total_docs_filtered,
+                                    'батчей': batches_indexed
+                                })
+                                
+                                if len(chunk_batch) >= self.chunk_batch_size:
+                                    batch_df = pd.DataFrame(chunk_batch)
+                                    
+                                    if for_weaviate and indexer is not None:
+                                        self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
+                                        
+                                        with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
+                                            indexer.index_documents(batch_df, show_progress=False)
+                                        
+                                        batches_indexed += 1
+                                        all_chunks.extend(chunk_batch)
+                                        chunk_batch = []
+                                        del batch_df
+                                        gc.collect()
+                                        if TORCH_AVAILABLE and torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                            except Exception as e:
+                                self.logger.error(f"Ошибка при обработке документа {idx}: {e}")
+                                total_docs_processed += 1
+                                total_docs_filtered += 1
+                                pbar.update(1)
+                else:
+                    # Последовательная обработка (по умолчанию)
+                    for idx, doc_row in doc_chunk_df.iterrows():
+                        # Обработка одного документа
+                        doc_chunks = self.process_document(doc_row)
+
+                        if doc_chunks:
+                            chunk_batch.extend(doc_chunks)
+                            total_chunks_created += len(doc_chunks)
+                        else:
+                            total_docs_filtered += 1
+
+                        total_docs_processed += 1
+                        
+                        # Обновляем прогресс-бар
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'чанков': total_chunks_created,
+                            'отфильтр.': total_docs_filtered,
+                            'батчей': batches_indexed
+                        })
+
+                        # Если накопили достаточно чанков для батча
+                        if len(chunk_batch) >= self.chunk_batch_size:
+                            # Конвертируем в DataFrame
+                            batch_df = pd.DataFrame(chunk_batch)
+
+                            if for_weaviate and indexer is not None:
+                                # Weaviate: индексируем сразу
+                                self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
+
+                                with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
+                                    indexer.index_documents(batch_df, show_progress=False)
+
+                                batches_indexed += 1
+
+                                # Для Weaviate: сохраняем метаданные чанков (без эмбеддингов)
+                                all_chunks.extend(chunk_batch)
+
+                                # Очищаем батч из памяти
+                                chunk_batch = []
+                                del batch_df
+
+                                # Чистим GPU память
+                                gc.collect()
+                                if TORCH_AVAILABLE and torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            else:
+                                raise RuntimeError("Ожидался режим Weaviate с активным indexer")
 
             # Прогресс уже обновляется через tqdm
             self.logger.info(
