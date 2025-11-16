@@ -135,15 +135,25 @@ class QueryReformulator:
         """
         import re
         
-        # Удаляем reasoning теги и их содержимое
+        if not text or not isinstance(text, str):
+            return text
+        
+        original_text = text
+        
+        # Удаляем reasoning теги и их содержимое (разные варианты)
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<think>.*', '', text, flags=re.DOTALL | re.IGNORECASE)  # незакрытый тег
         
-        # Удаляем строки, начинающиеся с "Хорошо", "Давайте" и т.д. (reasoning процесс)
+        # Удаляем строки, начинающиеся с reasoning-маркеров
         lines = text.split('\n')
         cleaned_lines = []
         skip_reasoning = True
+        reasoning_markers = [
+            'хорошо', 'давайте', 'сначала', 'нужно', 'возможно', 'итак', 'теперь',
+            'well', 'let', 'first', 'need', 'maybe', 'so', 'now', 'then'
+        ]
         
         for line in lines:
             line = line.strip()
@@ -152,23 +162,41 @@ class QueryReformulator:
             
             # Пропускаем reasoning строки
             if skip_reasoning:
-                if any(line.lower().startswith(prefix) for prefix in [
-                    'хорошо', 'давайте', 'сначала', 'нужно', 'возможно',
-                    'well', 'let', 'first', 'need', 'maybe'
-                ]):
+                line_lower = line.lower()
+                # Проверяем начало строки
+                if any(line_lower.startswith(marker) for marker in reasoning_markers):
+                    continue
+                # Проверяем если строка содержит только reasoning-текст
+                if len(line) < 30 and any(marker in line_lower for marker in reasoning_markers):
                     continue
                 # Если нашли что-то похожее на финальный ответ, начинаем собирать
-                if len(line) > 20 and not line.startswith('<'):
+                if len(line) > 15 and not line.startswith('<') and not any(marker in line_lower[:20] for marker in reasoning_markers):
                     skip_reasoning = False
             
             if not skip_reasoning:
+                # Пропускаем строки, которые явно являются reasoning
+                line_lower = line.lower()
+                if len(line) < 30 and any(marker in line_lower for marker in reasoning_markers):
+                    continue
                 cleaned_lines.append(line)
         
         result = ' '.join(cleaned_lines).strip()
         
-        # Если ничего не осталось, возвращаем оригинал (на случай если это не reasoning модель)
-        if not result:
-            result = text.strip()
+        # Если ничего не осталось или результат слишком короткий, пробуем другой подход
+        if not result or len(result) < 10:
+            # Пробуем взять последнюю значимую строку
+            lines = original_text.split('\n')
+            for line in reversed(lines):
+                line = line.strip()
+                if line and len(line) > 15:
+                    line_lower = line.lower()
+                    if not any(line_lower.startswith(marker) for marker in reasoning_markers):
+                        result = line
+                        break
+        
+        # Если все еще ничего, возвращаем оригинал (на случай если это не reasoning модель)
+        if not result or len(result) < 5:
+            result = original_text.strip()
         
         return result
 
@@ -188,7 +216,17 @@ class QueryReformulator:
             logger = logging.getLogger(__name__)
             logger.debug(f"[QueryReformulator] Использован кэш для ключа {cache_key[:16]}...")
             with open(cache_file, 'rb') as f:
-                return pickle.load(f)
+                cached_result = pickle.load(f)
+                # Применяем извлечение финального ответа даже для кэшированных результатов
+                # (на случай если кэш был создан до исправления парсинга)
+                if isinstance(cached_result, str):
+                    cleaned = self._extract_final_answer(cached_result)
+                    # Если результат изменился после очистки, обновляем кэш
+                    if cleaned != cached_result:
+                        logger.debug(f"[QueryReformulator] Очистка кэшированного результата от reasoning")
+                        self._save_to_cache(cache_key, cleaned)
+                    return cleaned
+                return cached_result
         return None
 
     def _save_to_cache(self, cache_key: str, result: str):

@@ -150,6 +150,80 @@ class LLMDocumentCleanerAPI:
             self.llm_logger.addHandler(handler)
             self.llm_logger.setLevel(logging.INFO)
     
+    def _extract_final_answer(self, text: str) -> str:
+        """
+        Извлечение финального ответа из reasoning моделей
+        
+        Reasoning модели (sherlock-think-alpha, deepseek-r1 и т.д.) возвращают
+        reasoning процесс в тегах <think>, <think> и т.д.
+        Нужно извлечь только финальный ответ.
+        """
+        if not text or not isinstance(text, str):
+            return text
+        
+        original_text = text
+        
+        # Удаляем reasoning теги и их содержимое (разные варианты)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<think>.*', '', text, flags=re.DOTALL | re.IGNORECASE)  # незакрытый тег
+        
+        # Удаляем строки, начинающиеся с reasoning-маркеров
+        lines = text.split('\n')
+        cleaned_lines = []
+        skip_reasoning = True
+        reasoning_markers = [
+            'хорошо', 'давайте', 'сначала', 'нужно', 'возможно', 'итак', 'теперь',
+            'well', 'let', 'first', 'need', 'maybe', 'so', 'now', 'then'
+        ]
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Пропускаем reasoning строки
+            if skip_reasoning:
+                line_lower = line.lower()
+                # Проверяем начало строки
+                if any(line_lower.startswith(marker) for marker in reasoning_markers):
+                    continue
+                # Проверяем если строка содержит только reasoning-текст
+                if len(line) < 30 and any(marker in line_lower for marker in reasoning_markers):
+                    continue
+                # Если нашли что-то похожее на финальный ответ, начинаем собирать
+                if len(line) > 15 and not line.startswith('<') and not any(marker in line_lower[:20] for marker in reasoning_markers):
+                    skip_reasoning = False
+            
+            if not skip_reasoning:
+                # Пропускаем строки, которые явно являются reasoning
+                line_lower = line.lower()
+                if len(line) < 30 and any(marker in line_lower for marker in reasoning_markers):
+                    continue
+                cleaned_lines.append(line)
+        
+        result = ' '.join(cleaned_lines).strip()
+        
+        # Если ничего не осталось или результат слишком короткий, пробуем другой подход
+        if not result or len(result) < 10:
+            # Пробуем взять последнюю значимую строку
+            lines = original_text.split('\n')
+            for line in reversed(lines):
+                line = line.strip()
+                if line and len(line) > 15:
+                    line_lower = line.lower()
+                    if not any(line_lower.startswith(marker) for marker in reasoning_markers):
+                        result = line
+                        break
+        
+        # Если все еще ничего, возвращаем оригинал (на случай если это не reasoning модель)
+        if not result or len(result) < 5:
+            result = original_text.strip()
+        
+        return result
+
     def _call_api(self, prompt: str) -> str:
         """Вызов OpenRouter API"""
         # OpenRouter использует OpenAI-совместимый API
@@ -166,7 +240,12 @@ class LLMDocumentCleanerAPI:
             request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
         
         response = self.client.chat.completions.create(**request_params)
-        return response.choices[0].message.content
+        raw_response = response.choices[0].message.content
+        
+        # Извлекаем финальный ответ из reasoning моделей
+        cleaned_response = self._extract_final_answer(raw_response)
+        
+        return cleaned_response
     
     def _preprocess_text_before_llm(self, text: str) -> str:
         """Агрессивная предобработка текста (та же логика что и в локальной версии)"""
@@ -236,8 +315,10 @@ JSON:
             try:
                 response_text = self._call_api(prompt)
                 
-                # Парсинг JSON (та же логика что и в локальной версии)
+                # Парсинг JSON (улучшенная логика с обработкой reasoning)
                 raw_result = None
+                
+                # Стратегия 1: ищем первый валидный JSON объект, начиная с первой {
                 first_brace = response_text.find('{')
                 if first_brace != -1:
                     brace_count = 0
@@ -258,6 +339,7 @@ JSON:
                         except json.JSONDecodeError:
                             pass
                 
+                # Стратегия 2: если не получилось, пробуем найти JSON между первыми { и последними }
                 if raw_result is None:
                     first_brace = response_text.find('{')
                     last_brace = response_text.rfind('}')
@@ -268,11 +350,41 @@ JSON:
                         except json.JSONDecodeError:
                             pass
                 
+                # Стратегия 3: пробуем парсить весь ответ как JSON (на случай если там только JSON)
                 if raw_result is None:
                     try:
                         raw_result = json.loads(response_text.strip())
                     except json.JSONDecodeError:
                         pass
+                
+                # Стратегия 4: пробуем найти JSON после reasoning маркеров
+                if raw_result is None:
+                    # Ищем JSON после строк типа "JSON:", "Ответ:", "Результат:"
+                    json_markers = ['json:', 'ответ:', 'результат:', 'result:', 'output:']
+                    for marker in json_markers:
+                        marker_pos = response_text.lower().find(marker)
+                        if marker_pos != -1:
+                            # Ищем { после маркера
+                            brace_pos = response_text.find('{', marker_pos)
+                            if brace_pos != -1:
+                                try:
+                                    # Пробуем извлечь JSON от этой позиции
+                                    brace_count = 0
+                                    last_brace = -1
+                                    for i in range(brace_pos, len(response_text)):
+                                        if response_text[i] == '{':
+                                            brace_count += 1
+                                        elif response_text[i] == '}':
+                                            brace_count -= 1
+                                            if brace_count == 0:
+                                                last_brace = i
+                                                break
+                                    if last_brace != -1:
+                                        json_str = response_text[brace_pos:last_brace + 1]
+                                        raw_result = json.loads(json_str)
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
                 
                 if raw_result:
                     raw_result.setdefault("clean_text", text_truncated)
