@@ -97,7 +97,7 @@ python main_pipeline.py search
 python main_pipeline.py search --limit 20
 
 # С оптимизацией параметров (grid search)
-python main_pipeline.py search --optimize --optimize-mode quick --optimize-sample 50
+python main_pipeline.py search --limit 10 --optimize --optimize-mode quick --optimize-sample 50
 
 # С LLM reranking через API (быстро!)
 export LLM_MODE=api

@@ -49,6 +49,7 @@ from src.config import (
     HYBRID_ALPHA,
     TOP_N_DOCUMENTS,
     LLM_MODEL_FILE,
+    LLM_MODE,
     ENABLE_AGENT_RAG,
     ENABLE_QUERY_EXPANSION,
     QUERY_EXPANSION_METHOD,
@@ -67,6 +68,7 @@ from src.config import (
     RERANKER_MAX_LENGTH,
     RERANKER_TYPE,
     CROSS_ENCODER_MODEL,
+    LLM_API_ROUTING,
     ENABLE_RRF,
     RRF_K,
     ENABLE_CONTEXT_WINDOW,
@@ -134,15 +136,31 @@ class HybridRetriever:
 
         # Инициализация Query Reformulator (для улучшения запросов)
         self.query_reformulator = None
-        if ENABLE_QUERY_REFORMULATION and LLAMA_CPP_AVAILABLE:
+        if ENABLE_QUERY_REFORMULATION:
             try:
                 from src.query_reformulation import QueryReformulator
-                llm_path = str(MODELS_DIR / LLM_MODEL_FILE)
-                self.query_reformulator = QueryReformulator(
-                    llm_path,
-                    use_cache=QUERY_REFORMULATION_CACHE
-                )
-                logging.getLogger(__name__).info(f"Query Reformulation включен (метод: {QUERY_REFORMULATION_METHOD})")
+                from src.config import LLM_MODE
+                
+                use_api = (LLM_MODE == "api")
+                
+                if use_api:
+                    # API режим
+                    self.query_reformulator = QueryReformulator(
+                        use_api=True,
+                        use_cache=QUERY_REFORMULATION_CACHE
+                    )
+                    logging.getLogger(__name__).info(f"Query Reformulation включен (API режим, метод: {QUERY_REFORMULATION_METHOD})")
+                elif LLAMA_CPP_AVAILABLE:
+                    # Локальный режим
+                    llm_path = str(MODELS_DIR / LLM_MODEL_FILE)
+                    self.query_reformulator = QueryReformulator(
+                        llm_path,
+                        use_api=False,
+                        use_cache=QUERY_REFORMULATION_CACHE
+                    )
+                    logging.getLogger(__name__).info(f"Query Reformulation включен (локальный режим, метод: {QUERY_REFORMULATION_METHOD})")
+                else:
+                    logging.getLogger(__name__).warning("Query Reformulation отключен: llama-cpp-python не доступен и API режим не включен")
             except Exception as e:
                 logging.getLogger(__name__).warning(f"Query Reformulator не загружен: {e}")
 
@@ -479,7 +497,7 @@ class LLMReranker:
             model_path: путь к GGUF модели (для локального режима)
             use_api: использовать ли API (если None - определяется из LLM_MODE)
         """
-        from src.config import LLM_MODE, LLM_API_MODEL, OPENROUTER_API_KEY
+        from src.config import LLM_MODE, LLM_API_MODEL, LLM_API_ROUTING, OPENROUTER_API_KEY
         
         # Определяем режим работы
         if use_api is None:

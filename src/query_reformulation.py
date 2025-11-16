@@ -16,11 +16,17 @@ LLM переформулирует запрос для лучшего поиск
 - Добавление банковских терминов
 - Расширение контекста
 """
-from llama_cpp import Llama
 from typing import List, Optional, Dict
 import hashlib
 import pickle
 from pathlib import Path
+
+# Условный импорт llama_cpp
+try:
+    from llama_cpp import Llama
+    LLAMA_CPP_AVAILABLE = True
+except ImportError:
+    LLAMA_CPP_AVAILABLE = False
 
 
 class QueryReformulator:
@@ -34,34 +40,90 @@ class QueryReformulator:
     4. Нормализация - исправление опечаток и сленга
     """
 
-    def __init__(self, llm_model_path: str,
+    def __init__(self, llm_model_path: str = None,
                  use_cache: bool = True,
-                 cache_dir: str = "cache/query_reformulation"):
+                 cache_dir: str = "cache/query_reformulation",
+                 use_api: bool = None):
         """
         Args:
-            llm_model_path: путь к LLM модели
+            llm_model_path: путь к LLM модели (для локального режима)
             use_cache: использовать кэш (ускоряет повторные запросы)
             cache_dir: директория для кэша
+            use_api: использовать ли API (если None - определяется из LLM_MODE)
         """
-        print(f"[QueryReformulator] Загрузка LLM: {llm_model_path}")
-
-        from src.config import LLM_CONTEXT_SIZE, LLM_GPU_LAYERS
-
-        self.llm = Llama(
-            model_path=llm_model_path,
-            n_ctx=LLM_CONTEXT_SIZE,
-            n_gpu_layers=LLM_GPU_LAYERS,
-            n_batch=512,
-            verbose=False
+        from src.config import (
+            LLM_MODE, LLM_API_MODEL, LLM_API_ROUTING, OPENROUTER_API_KEY,
+            LLM_CONTEXT_SIZE, LLM_GPU_LAYERS, MODELS_DIR, LLM_MODEL_FILE
         )
+        
+        # Определяем режим работы
+        if use_api is None:
+            use_api = (LLM_MODE == "api")
+        
+        self.use_api = use_api
+        
+        if use_api:
+            # API режим (OpenRouter)
+            print(f"[QueryReformulator] Инициализация (API режим, модель: {LLM_API_MODEL})")
+            try:
+                from openai import OpenAI
+                base_url = "https://openrouter.ai/api/v1"
+                
+                if not OPENROUTER_API_KEY:
+                    raise ValueError(
+                        "OPENROUTER_API_KEY не установлен!\n"
+                        "Получите бесплатный ключ на https://openrouter.ai/keys\n"
+                        "Установите: export OPENROUTER_API_KEY=sk-or-v1-..."
+                    )
+                
+                default_headers = {
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/your-repo",
+                    "X-Title": "AlfaBank RAG Pipeline"
+                }
+                
+                if LLM_API_ROUTING:
+                    default_headers["X-OpenRouter-Provider"] = LLM_API_ROUTING
+                
+                self.client = OpenAI(
+                    base_url=base_url,
+                    api_key=OPENROUTER_API_KEY,
+                    timeout=60,
+                    default_headers=default_headers
+                )
+                self.model_name = LLM_API_MODEL
+                self.llm = None
+                print(f"[QueryReformulator] Инициализирован (API)")
+            except ImportError:
+                raise ImportError("Установите openai: pip install openai")
+        else:
+            # Локальный режим
+            if not LLAMA_CPP_AVAILABLE:
+                raise ImportError(
+                    "llama-cpp-python не установлен. "
+                    "Установите: pip install llama-cpp-python"
+                )
+            
+            if llm_model_path is None:
+                llm_model_path = str(MODELS_DIR / LLM_MODEL_FILE)
+            
+            print(f"[QueryReformulator] Загрузка LLM: {llm_model_path}")
+
+            self.llm = Llama(
+                model_path=llm_model_path,
+                n_ctx=LLM_CONTEXT_SIZE,
+                n_gpu_layers=LLM_GPU_LAYERS,
+                n_batch=512,
+                verbose=False
+            )
+            self.client = None
+            print(f"[QueryReformulator] Инициализирован (локальный)")
 
         self.use_cache = use_cache
         if use_cache:
             self.cache_dir = Path(cache_dir)
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             print(f"[QueryReformulator] Кэш включен: {self.cache_dir}")
-
-        print(f"[QueryReformulator] Инициализирован")
 
     def _get_cache_key(self, query: str, method: str) -> str:
         """Генерация ключа кэша"""
@@ -121,15 +183,31 @@ class QueryReformulator:
 """
 
         try:
-            response = self.llm(
-                prompt,
-                max_tokens=100,
-                temperature=0.3,
-                stop=["<|im_end|>", "\n\n"],
-                echo=False
-            )
-
-            reformulated = response['choices'][0]['text'].strip()
+            if self.use_api:
+                # API режим
+                request_params = {
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 100
+                }
+                
+                from src.config import LLM_API_ROUTING
+                if LLM_API_ROUTING:
+                    request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
+                
+                response = self.client.chat.completions.create(**request_params)
+                reformulated = response.choices[0].message.content.strip()
+            else:
+                # Локальный режим
+                response = self.llm(
+                    prompt,
+                    max_tokens=100,
+                    temperature=0.3,
+                    stop=["<|im_end|>", "\n\n"],
+                    echo=False
+                )
+                reformulated = response['choices'][0]['text'].strip()
 
             # Очистка от артефактов
             if reformulated.startswith('"') and reformulated.endswith('"'):
@@ -176,15 +254,31 @@ class QueryReformulator:
 """
 
         try:
-            response = self.llm(
-                prompt,
-                max_tokens=150,
-                temperature=0.4,
-                stop=["<|im_end|>", "\n\n"],
-                echo=False
-            )
-
-            reformulated = response['choices'][0]['text'].strip()
+            if self.use_api:
+                # API режим
+                request_params = {
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                    "max_tokens": 150
+                }
+                
+                from src.config import LLM_API_ROUTING
+                if LLM_API_ROUTING:
+                    request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
+                
+                response = self.client.chat.completions.create(**request_params)
+                reformulated = response.choices[0].message.content.strip()
+            else:
+                # Локальный режим
+                response = self.llm(
+                    prompt,
+                    max_tokens=150,
+                    temperature=0.4,
+                    stop=["<|im_end|>", "\n\n"],
+                    echo=False
+                )
+                reformulated = response['choices'][0]['text'].strip()
 
             if reformulated.startswith('"') and reformulated.endswith('"'):
                 reformulated = reformulated[1:-1]
@@ -229,15 +323,31 @@ class QueryReformulator:
 """
 
         try:
-            response = self.llm(
-                prompt,
-                max_tokens=200,
-                temperature=0.5,  # выше для разнообразия
-                stop=["<|im_end|>"],
-                echo=False
-            )
-
-            result_text = response['choices'][0]['text'].strip()
+            if self.use_api:
+                # API режим
+                request_params = {
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.5,  # выше для разнообразия
+                    "max_tokens": 200
+                }
+                
+                from src.config import LLM_API_ROUTING
+                if LLM_API_ROUTING:
+                    request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
+                
+                response = self.client.chat.completions.create(**request_params)
+                result_text = response.choices[0].message.content.strip()
+            else:
+                # Локальный режим
+                response = self.llm(
+                    prompt,
+                    max_tokens=200,
+                    temperature=0.5,  # выше для разнообразия
+                    stop=["<|im_end|>"],
+                    echo=False
+                )
+                result_text = response['choices'][0]['text'].strip()
 
             # Парсим варианты
             variants = [query]  # Всегда включаем исходный
