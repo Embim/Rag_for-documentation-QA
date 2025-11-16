@@ -17,12 +17,15 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, Optional
+import logging
+from logging.handlers import RotatingFileHandler
 
 from src.config import (
     LLM_MODEL_FILE,
     LLM_CONTEXT_SIZE,
     LLM_GPU_LAYERS,
-    MODELS_DIR
+    MODELS_DIR,
+    OUTPUTS_DIR,
 )
 
 
@@ -49,11 +52,55 @@ class LLMDocumentCleaner:
         self.verbose = verbose
         self.llm = None
 
+        # Отдельный логгер для хранения результатов работы LLM
+        # (чтобы можно было анализировать, что именно вернула модель)
+        self.llm_logger = logging.getLogger("llm_cleaning")
+        self._init_llm_logger()
+
         if verbose:
             print(f"\n{'='*80}")
             print(f"📥 Инициализация LLM Document Cleaner")
             print(f"   Модель: {Path(model_path).name}")
             print(f"{'='*80}\n")
+
+    def _init_llm_logger(self):
+        """
+        Инициализация отдельного лог-файла для результатов LLM очистки.
+
+        Формат: одна строка = один JSON с результатом clean_document.
+        """
+        try:
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Если не удалось создать директорию — тихо выходим, чтобы не ломать пайплайн
+            return
+
+        log_path = OUTPUTS_DIR / "llm_cleaning.log"
+
+        # Проверяем, не добавлен ли уже хендлер на этот файл
+        handler_exists = any(
+            isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == str(log_path)
+            for h in self.llm_logger.handlers
+        )
+        if handler_exists:
+            return
+
+        handler = RotatingFileHandler(
+            str(log_path),
+            maxBytes=25 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        # Логируем в компактном формате: только сообщение (JSON)
+        formatter = logging.Formatter("%(message)s")
+        handler.setFormatter(formatter)
+
+        # INFO достаточно, т.к. каждая запись — один результат LLM
+        handler.setLevel(logging.INFO)
+        self.llm_logger.setLevel(logging.INFO)
+        self.llm_logger.addHandler(handler)
+        # Не дублируем в root, оставляем только отдельный файл
+        self.llm_logger.propagate = False
 
     def load_model(self):
         """Загрузка LLM модели"""
@@ -182,27 +229,35 @@ class LLMDocumentCleaner:
             # Извлекаем JSON из ответа
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
-                result = json.loads(json_match.group(0))
+                raw_result = json.loads(json_match.group(0))
                 # Нормализация полей под downstream:
                 # заполняем отсутствующие поля пустыми структурами
-                result.setdefault("clean_text", text_truncated)
-                result.setdefault("topics", [])
-                result.setdefault("usefulness_score", 0.5)
+                raw_result.setdefault("clean_text", text_truncated)
+                raw_result.setdefault("topics", [])
+                raw_result.setdefault("usefulness_score", 0.5)
                 # совместимость: эти поля могут использоваться downstream (entities сборка)
-                result.setdefault("products", [])
-                result.setdefault("actions", [])
-                result.setdefault("conditions", [])
+                raw_result.setdefault("products", [])
+                raw_result.setdefault("actions", [])
+                raw_result.setdefault("conditions", [])
                 # derive is_useful по прежней логике (порог ~0.3)
-                result["is_useful"] = bool(result.get("usefulness_score", 0.5) >= 0.3)
-                return result
+                raw_result["is_useful"] = bool(raw_result.get("usefulness_score", 0.5) >= 0.3)
+
+                # Логируем результат в отдельный лог-файл (без лишнего шума)
+                self._log_llm_result(raw_result, original_text=text_truncated)
+
+                return raw_result
             else:
                 # Fallback если JSON не найден
-                return self._fallback_result(text_truncated)
+                fallback = self._fallback_result(text_truncated)
+                self._log_llm_result(fallback, original_text=text_truncated, reason="json_parse_failed")
+                return fallback
 
         except Exception as e:
             if self.verbose:
                 print(f"  ⚠️  Ошибка обработки: {e}")
-            return self._fallback_result(text_truncated)
+            fallback = self._fallback_result(text_truncated)
+            self._log_llm_result(fallback, original_text=text_truncated, reason=str(e))
+            return fallback
 
     def _fallback_result(self, text: str) -> Dict:
         """Fallback результат если LLM не работает"""
@@ -215,6 +270,39 @@ class LLMDocumentCleaner:
             "usefulness_score": 0.5,
             "is_useful": True
         }
+
+    def _log_llm_result(self, result: Dict, original_text: str, reason: Optional[str] = None) -> None:
+        """
+        Логирование результата LLM очистки в отдельный JSON-лог.
+
+        Мы логируем:
+        - краткие метаданные,
+        - усечённый original_text и clean_text (чтобы лог не разрастался бесконечно).
+        """
+        if not self.llm_logger.handlers:
+            # Логгер не инициализирован (например, не удалось создать файл)
+            return
+
+        try:
+            log_record = {
+                "reason": reason,
+                "usefulness_score": result.get("usefulness_score"),
+                "is_useful": result.get("is_useful"),
+                "topics": result.get("topics", []),
+                "products": result.get("products", []),
+                "actions": result.get("actions", []),
+                "conditions": result.get("conditions", []),
+                # web_id может добавляться на следующих этапах — здесь обычно None,
+                # но поле оставляем для единообразия если в будущем туда будут писать
+                "web_id": result.get("web_id"),
+                # Превью текстов (усекаем, чтобы файл был разумного размера)
+                "original_text_preview": original_text[:1000],
+                "clean_text_preview": str(result.get("clean_text", ""))[:1000],
+            }
+            self.llm_logger.info(json.dumps(log_record, ensure_ascii=False))
+        except Exception:
+            # Логирование не должно ломать основной пайплайн
+            pass
 
     def process_documents(self, documents_df: pd.DataFrame,
                          text_column: str = 'text') -> pd.DataFrame:

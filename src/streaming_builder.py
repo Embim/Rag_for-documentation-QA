@@ -17,10 +17,12 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 import gc
+from tqdm import tqdm
 
 from src.preprocessing import TextPreprocessor
 from src.chunking import DocumentChunker
 from src.logger import get_logger, log_timing
+from src.config import CSV_CHUNKSIZE, CSV_COUNT_CHUNKSIZE
 
 try:
     import torch
@@ -41,18 +43,18 @@ class StreamingDocumentProcessor:
                  llm_clean: bool = False,
                  min_usefulness: float = 0.3,
                  chunk_batch_size: int = 500,
-                 csv_chunksize: int = 10):
+                 csv_chunksize: int = None):
         """
         Args:
             llm_clean: использовать LLM для очистки документов
             min_usefulness: минимальный порог полезности (0.0-1.0)
             chunk_batch_size: сколько чанков накапливать перед индексацией батча
-            csv_chunksize: сколько строк CSV читать за раз
+            csv_chunksize: сколько строк CSV читать за раз (если None - из config.CSV_CHUNKSIZE)
         """
         self.llm_clean = llm_clean
         self.min_usefulness = min_usefulness
         self.chunk_batch_size = chunk_batch_size
-        self.csv_chunksize = csv_chunksize
+        self.csv_chunksize = csv_chunksize if csv_chunksize is not None else CSV_CHUNKSIZE
 
         self.logger = get_logger(__name__)
 
@@ -177,6 +179,25 @@ class StreamingDocumentProcessor:
         self.logger.info(f"Размер чанка CSV: {self.csv_chunksize} документов")
         self.logger.info("="*80)
 
+        # Подсчитываем общее количество документов для прогресс-бара
+        print("\n" + "="*80)
+        print("📊 Подсчет общего количества документов...")
+        print("="*80)
+        try:
+            # Быстрый подсчет: читаем только первую колонку большими батчами
+            # Используем большой chunksize (из config) т.к. мы только считаем строки,
+            # не обрабатываем данные - это намного быстрее чем обработка (где chunksize=5-10)
+            total_docs = 0
+            for chunk in pd.read_csv(csv_path, chunksize=CSV_COUNT_CHUNKSIZE, usecols=[0]):
+                total_docs += len(chunk)
+            print(f"✓ Всего документов в CSV: {total_docs:,}")
+        except Exception as e:
+            # Если не получилось - используем динамический прогресс
+            print(f"⚠ Не удалось подсчитать документы: {e}")
+            print("   Используется динамический прогресс-бар")
+            total_docs = None
+        print("="*80 + "\n")
+
         all_chunks = []
         chunk_batch = []
 
@@ -188,56 +209,80 @@ class StreamingDocumentProcessor:
         # Читаем CSV по частям (streaming)
         csv_reader = pd.read_csv(csv_path, chunksize=self.csv_chunksize)
 
-        for csv_chunk_idx, doc_chunk_df in enumerate(csv_reader):
-            self.logger.info(f"\n[Батч CSV {csv_chunk_idx + 1}] Обработка {len(doc_chunk_df)} документов...")
+        # Создаем tqdm прогресс-бар
+        desc = "🚀 Построение базы знаний"
+        if self.llm_clean:
+            desc += " (с LLM очисткой)"
+        pbar = tqdm(
+            total=total_docs,
+            desc=desc,
+            unit="док",
+            ncols=100,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+        )
 
-            for idx, doc_row in doc_chunk_df.iterrows():
-                # Обработка одного документа
-                doc_chunks = self.process_document(doc_row)
+        try:
+            for csv_chunk_idx, doc_chunk_df in enumerate(csv_reader):
+                self.logger.info(f"\n[Батч CSV {csv_chunk_idx + 1}] Обработка {len(doc_chunk_df)} документов...")
 
-                if doc_chunks:
-                    chunk_batch.extend(doc_chunks)
-                    total_chunks_created += len(doc_chunks)
-                else:
-                    total_docs_filtered += 1
+                for idx, doc_row in doc_chunk_df.iterrows():
+                    # Обработка одного документа
+                    doc_chunks = self.process_document(doc_row)
 
-                total_docs_processed += 1
-
-                # Если накопили достаточно чанков для батча
-                if len(chunk_batch) >= self.chunk_batch_size:
-                    # Конвертируем в DataFrame
-                    batch_df = pd.DataFrame(chunk_batch)
-
-                    if for_weaviate and indexer is not None:
-                        # Weaviate: индексируем сразу
-                        self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
-
-                        with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
-                            indexer.index_documents(batch_df, show_progress=False)
-
-                        batches_indexed += 1
-
-                        # Для Weaviate: сохраняем метаданные чанков (без эмбеддингов)
-                        all_chunks.extend(chunk_batch)
-
-                        # Очищаем батч из памяти
-                        chunk_batch = []
-                        del batch_df
-
-                        # Чистим GPU память
-                        gc.collect()
-                        if TORCH_AVAILABLE and torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    if doc_chunks:
+                        chunk_batch.extend(doc_chunks)
+                        total_chunks_created += len(doc_chunks)
                     else:
-                        raise RuntimeError("Ожидался режим Weaviate с активным indexer")
+                        total_docs_filtered += 1
 
-            # Прогресс (общее количество документов считаем по мере обработки,
-            # так как CSV может содержать переводы строк внутри текста)
+                    total_docs_processed += 1
+                    
+                    # Обновляем прогресс-бар
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'чанков': total_chunks_created,
+                        'отфильтр.': total_docs_filtered,
+                        'батчей': batches_indexed
+                    })
+
+                    # Если накопили достаточно чанков для батча
+                    if len(chunk_batch) >= self.chunk_batch_size:
+                        # Конвертируем в DataFrame
+                        batch_df = pd.DataFrame(chunk_batch)
+
+                        if for_weaviate and indexer is not None:
+                            # Weaviate: индексируем сразу
+                            self.logger.info(f"  → Индексация батча {batches_indexed + 1}: {len(batch_df)} чанков в Weaviate...")
+
+                            with log_timing(self.logger, f"Индексация батча {batches_indexed + 1}"):
+                                indexer.index_documents(batch_df, show_progress=False)
+
+                            batches_indexed += 1
+
+                            # Для Weaviate: сохраняем метаданные чанков (без эмбеддингов)
+                            all_chunks.extend(chunk_batch)
+
+                            # Очищаем батч из памяти
+                            chunk_batch = []
+                            del batch_df
+
+                            # Чистим GPU память
+                            gc.collect()
+                            if TORCH_AVAILABLE and torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        else:
+                            raise RuntimeError("Ожидался режим Weaviate с активным indexer")
+
+            # Прогресс уже обновляется через tqdm
             self.logger.info(
                 f"  Прогресс: {total_docs_processed} документов | "
                 f"Чанков создано: {total_chunks_created} | "
                 f"Отфильтровано: {total_docs_filtered}"
             )
+        
+        finally:
+            # Закрываем прогресс-бар
+            pbar.close()
 
         # Обработка остатка
         if chunk_batch:
@@ -255,6 +300,20 @@ class StreamingDocumentProcessor:
                 raise RuntimeError("Ожидался режим Weaviate с активным indexer")
 
         # Итоговая статистика
+        print("\n" + "="*80)
+        print("📈 СТАТИСТИКА ОБРАБОТКИ")
+        print("="*80)
+        print(f"Документов обработано: {total_docs_processed:,}")
+        print(f"Документов отфильтровано: {total_docs_filtered:,} ({total_docs_filtered/max(total_docs_processed,1)*100:.1f}%)")
+        print(f"Чанков создано: {total_chunks_created:,}")
+        print(f"Среднее чанков/документ: {total_chunks_created/max(total_docs_processed-total_docs_filtered,1):.1f}")
+
+        if for_weaviate:
+            print(f"Батчей проиндексировано в Weaviate: {batches_indexed}")
+
+        print("="*80 + "\n")
+        
+        # Дублируем в лог
         self.logger.info("\n" + "="*80)
         self.logger.info("СТАТИСТИКА ОБРАБОТКИ")
         self.logger.info("="*80)
@@ -284,7 +343,7 @@ def build_knowledge_base_streaming(csv_path: str,
                                    llm_clean: bool = False,
                                    min_usefulness: float = 0.3,
                                    chunk_batch_size: int = 500,
-                                   csv_chunksize: int = 10) -> Optional[pd.DataFrame]:
+                                   csv_chunksize: int = None) -> Optional[pd.DataFrame]:
     """
     Удобная функция для построения базы знаний потоковым методом
 
@@ -295,7 +354,7 @@ def build_knowledge_base_streaming(csv_path: str,
         llm_clean: использовать LLM очистку
         min_usefulness: минимальный порог полезности
         chunk_batch_size: размер батча для индексации
-        csv_chunksize: сколько документов читать за раз
+        csv_chunksize: сколько документов читать за раз (если None - из config.CSV_CHUNKSIZE)
 
     Returns:
         DataFrame с чанками (для FAISS) или None (для Weaviate)

@@ -32,6 +32,10 @@ CHILD_CHUNK_SIZE = 100  # маленькие чанки для точного п
 PARENT_CHUNK_SIZE = 300  # большие чанки для полного контекста
 PARENT_CHILD_OVERLAP = 20  # перекрытие между чанками
 
+# Параметры чтения CSV (streaming)
+CSV_CHUNKSIZE = int(os.environ.get("CSV_CHUNKSIZE", "10"))  # сколько строк CSV читать за раз при обработке (маленький для LLM)
+CSV_COUNT_CHUNKSIZE = int(os.environ.get("CSV_COUNT_CHUNKSIZE", "50000"))  # chunksize для быстрого подсчета документов
+
 # Параметры embedding модели
 # A100 80GB оптимизация: используем BGE-M3 - лучшую multilingual модель
 EMBEDDING_MODEL = "BAAI/bge-m3"  #  (1024 dim, hybrid retrieval)

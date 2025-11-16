@@ -128,7 +128,7 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
             llm_clean=llm_clean,
             min_usefulness=min_usefulness,
             chunk_batch_size=500,  # индексируем по 500 чанков
-            csv_chunksize=5        # читаем по 5 документов за раз
+            csv_chunksize=None     # используем CSV_CHUNKSIZE из config.py
         )
 
     logger.info(f"Всего чанков: {len(chunks_df)}")
