@@ -224,8 +224,12 @@ class LLMDocumentCleanerAPI:
         
         return result
 
-    def _call_api(self, prompt: str) -> str:
-        """Вызов OpenRouter API"""
+    def _call_api(self, prompt: str) -> tuple[str, str]:
+        """Вызов OpenRouter API
+        
+        Returns:
+            tuple: (raw_response, cleaned_response)
+        """
         # OpenRouter использует OpenAI-совместимый API
         # Подготавливаем параметры запроса
         request_params = {
@@ -245,7 +249,7 @@ class LLMDocumentCleanerAPI:
         # Извлекаем финальный ответ из reasoning моделей
         cleaned_response = self._extract_final_answer(raw_response)
         
-        return cleaned_response
+        return raw_response, cleaned_response
     
     def _preprocess_text_before_llm(self, text: str) -> str:
         """Агрессивная предобработка текста (та же логика что и в локальной версии)"""
@@ -311,9 +315,11 @@ JSON:
 }}"""
         
         # Вызов API с повторными попытками
+        raw_json_response = None
         for attempt in range(self.retries):
             try:
-                response_text = self._call_api(prompt)
+                raw_response, response_text = self._call_api(prompt)
+                raw_json_response = raw_response  # Сохраняем сырой ответ для логирования
                 
                 # Парсинг JSON (улучшенная логика с обработкой reasoning)
                 raw_result = None
@@ -401,9 +407,15 @@ JSON:
                         del self._cache[oldest_key]
                     self._cache[text_hash] = raw_result.copy()
                     
+                    # Логируем результат с сырым JSON ответом
+                    self._log_llm_result(raw_result, original_text=text_truncated, raw_json_response=raw_json_response)
+                    
                     return raw_result
                 else:
-                    return self._fallback_result(text_truncated)
+                    # Fallback если JSON не найден
+                    fallback = self._fallback_result(text_truncated)
+                    self._log_llm_result(fallback, original_text=text_truncated, reason="json_parse_failed", raw_json_response=raw_json_response)
+                    return fallback
             
             except Exception as e:
                 if attempt < self.retries - 1:
@@ -413,9 +425,14 @@ JSON:
                 else:
                     if self.verbose:
                         print(f"  ⚠️  Ошибка API после {self.retries} попыток: {e}")
-                    return self._fallback_result(text_truncated)
+                    fallback = self._fallback_result(text_truncated)
+                    self._log_llm_result(fallback, original_text=text_truncated, reason=str(e), raw_json_response=raw_json_response)
+                    return fallback
         
-        return self._fallback_result(text_truncated)
+        # Если все попытки исчерпаны
+        fallback = self._fallback_result(text_truncated)
+        self._log_llm_result(fallback, original_text=text_truncated, reason="all_retries_exhausted", raw_json_response=raw_json_response)
+        return fallback
     
     def _fallback_result(self, text: str) -> Dict:
         """Fallback результат если API не сработал"""
@@ -775,7 +792,7 @@ JSON:
             "is_useful": True
         }
 
-    def _log_llm_result(self, result: Dict, original_text: str, reason: Optional[str] = None) -> None:
+    def _log_llm_result(self, result: Dict, original_text: str, reason: Optional[str] = None, raw_json_response: Optional[str] = None) -> None:
         """
         Логирование результата LLM очистки в отдельный JSON-лог.
 
@@ -811,6 +828,11 @@ JSON:
                 "original_text_preview": original_text[:1000],
                 "clean_text_preview": str(result.get("clean_text", ""))[:1000],
             }
+            
+            # Добавляем сырой JSON ответ от API (если доступен)
+            if raw_json_response is not None:
+                # Ограничиваем длину сырого ответа (первые 2000 символов)
+                log_record["raw_json_response"] = raw_json_response[:2000]
             self.llm_logger.info(json.dumps(log_record, ensure_ascii=False))
             
             # Принудительно сбрасываем буферы всех хендлеров
