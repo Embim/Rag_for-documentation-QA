@@ -11,6 +11,7 @@ from src.config import (
     LLM_GPU_LAYERS,
     MODELS_DIR
 )
+from src.logger import get_logger
 
 
 class QueryExpander:
@@ -38,11 +39,13 @@ class QueryExpander:
         """
         self.use_llm = use_llm
 
+        self.logger = get_logger(__name__)
+
         if use_llm:
             if model_path is None:
                 model_path = str(MODELS_DIR / LLM_MODEL_FILE)
 
-            print(f"Загрузка LLM для Query Expansion: {model_path}")
+            self.logger.info(f"Загрузка LLM для Query Expansion: {model_path}")
 
             self.llm = Llama(
                 model_path=model_path,
@@ -52,10 +55,10 @@ class QueryExpander:
                 verbose=False
             )
 
-            print("  LLM загружена успешно")
+            self.logger.info("LLM загружена успешно")
         else:
             self.llm = None
-            print("Query Expansion: только словарь синонимов")
+            self.logger.info("Query Expansion: только словарь синонимов")
 
     def expand_with_synonyms(self, query: str) -> List[str]:
         """
@@ -126,7 +129,7 @@ class QueryExpander:
             return variants[:4]  # Макс 4 варианта
 
         except Exception as e:
-            print(f"  Ошибка LLM expansion: {e}")
+            self.logger.warning(f"Ошибка LLM expansion: {e}")
             return [query]
 
     def expand_query(self, query: str, method: str = "hybrid") -> List[str]:

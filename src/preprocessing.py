@@ -14,6 +14,7 @@ from natasha import (
 import pymorphy2
 
 from src.config import SYNONYMS
+from src.logger import get_logger, log_timing
 
 
 class TextPreprocessor:
@@ -199,12 +200,14 @@ def load_and_preprocess_documents(csv_path: str,
     Returns:
         DataFrame с предобработанными текстами
     """
-    print(f"Загрузка документов из {csv_path}...")
-    df = pd.read_csv(csv_path)
+    logger = get_logger(__name__)
+    logger.info(f"Загрузка документов из {csv_path}...")
+    with log_timing(logger, "Загрузка CSV (documents)"):
+        df = pd.read_csv(csv_path)
 
     preprocessor = TextPreprocessor()
 
-    print("Предобработка текстов...")
+    logger.info("Предобработка текстов...")
     df['processed_text'] = df.apply(
         lambda row: preprocessor.preprocess_document(
             row['text'],
@@ -214,7 +217,7 @@ def load_and_preprocess_documents(csv_path: str,
         axis=1
     )
 
-    print(f"Обработано {len(df)} документов")
+    logger.info(f"Обработано {len(df)} документов")
     return df
 
 
@@ -230,17 +233,19 @@ def load_and_preprocess_questions(csv_path: str,
     Returns:
         DataFrame с предобработанными вопросами
     """
-    print(f"Загрузка вопросов из {csv_path}...")
-    df = pd.read_csv(csv_path)
+    logger = get_logger(__name__)
+    logger.info(f"Загрузка вопросов из {csv_path}...")
+    with log_timing(logger, "Загрузка CSV (questions)"):
+        df = pd.read_csv(csv_path)
 
     preprocessor = TextPreprocessor()
 
-    print("Предобработка вопросов...")
+    logger.info("Предобработка вопросов...")
     df['processed_query'] = df['query'].apply(
         lambda q: preprocessor.preprocess_query(q, apply_lemmatization)
     )
 
-    print(f"Обработано {len(df)} вопросов")
+    logger.info(f"Обработано {len(df)} вопросов")
     return df
 
 

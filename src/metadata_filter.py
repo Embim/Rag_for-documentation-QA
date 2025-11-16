@@ -89,7 +89,9 @@ class MetadataFilter:
         Returns:
             отфильтрованный DataFrame
         """
-        if not required_products or 'products' not in results_df.columns:
+        # Поддержка альтернативного поля: entities (если products отсутствует)
+        products_field = 'products' if 'products' in results_df.columns else ('entities' if 'entities' in results_df.columns else None)
+        if not required_products or products_field is None:
             return results_df
 
         def check_products(products_json: str) -> bool:
@@ -114,7 +116,7 @@ class MetadataFilter:
             except:
                 return False
 
-        mask = results_df['products'].apply(check_products)
+        mask = results_df[products_field].apply(check_products)
         filtered = results_df[mask].copy()
 
         return filtered if len(filtered) > 0 else results_df  # fallback к исходным
@@ -196,9 +198,22 @@ class MetadataFilter:
             except:
                 return row['retrieval_score']
 
-        if 'retrieval_score' in results_df.columns and 'products' in results_df.columns:
+        products_field = 'products' if 'products' in results_df.columns else ('entities' if 'entities' in results_df.columns else None)
+        if 'retrieval_score' in results_df.columns and products_field:
             results_df = results_df.copy()
-            results_df['retrieval_score'] = results_df.apply(boost_if_match, axis=1)
+            # Переиспользуем products_field внутри функции
+            def boost_row(row):
+                try:
+                    field_val = row.get(products_field)
+                    if pd.isna(field_val):
+                        return row['retrieval_score']
+                    products = json.loads(field_val) if isinstance(field_val, str) else field_val
+                    products_lower = [p.lower() for p in products]
+                    has_match = any(qp.lower() in p for qp in query_products for p in products_lower)
+                    return row['retrieval_score'] * boost_score if has_match else row['retrieval_score']
+                except:
+                    return row['retrieval_score']
+            results_df['retrieval_score'] = results_df.apply(boost_row, axis=1)
             results_df = results_df.sort_values('retrieval_score', ascending=False)
 
         return results_df

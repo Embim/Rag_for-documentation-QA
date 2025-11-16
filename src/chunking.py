@@ -6,6 +6,7 @@ from typing import List, Dict
 from razdel import sentenize
 
 from src.config import CHUNK_SIZE, CHUNK_OVERLAP, MIN_CHUNK_SIZE
+from src.logger import get_logger, log_timing
 
 
 class DocumentChunker:
@@ -25,7 +26,7 @@ class DocumentChunker:
         self.min_chunk_size = min_chunk_size
 
     def chunk_by_words(self, text: str, web_id: int, title: str = "",
-                      url: str = "", kind: str = "") -> List[Dict]:
+                      url: str = "", kind: str = "", entities: str = "", topics: str = "") -> List[Dict]:
         """
         Разбиение текста на чанки скользящим окном по словам
 
@@ -61,7 +62,8 @@ class DocumentChunker:
             # Добавляем заголовок в начало чанка
             full_chunk_text = title_prefix + chunk_text
 
-            chunks.append({
+            # Базовые метаданные чанка
+            chunk_data = {
                 'chunk_id': f"{web_id}_{chunk_idx}",
                 'web_id': web_id,
                 'title': title,
@@ -73,14 +75,24 @@ class DocumentChunker:
                 # Дополнительные метаданные
                 'url': url,
                 'kind': kind,
-            })
+                'word_count': len(chunk_words),
+                'char_count': len(chunk_text),
+            }
+
+            # Прокидываем LLM-метаданные если есть
+            if entities:
+                chunk_data['entities'] = entities
+            if topics:
+                chunk_data['topics'] = topics
+
+            chunks.append(chunk_data)
 
             chunk_idx += 1
 
         return chunks
 
     def chunk_by_sentences(self, text: str, web_id: int, title: str = "",
-                          url: str = "", kind: str = "", max_sentences: int = 10) -> List[Dict]:
+                          url: str = "", kind: str = "", entities: str = "", topics: str = "", max_sentences: int = 10) -> List[Dict]:
         """
         Разбиение текста на чанки по предложениям
 
@@ -115,7 +127,7 @@ class DocumentChunker:
 
             full_chunk_text = title_prefix + chunk_text
 
-            chunks.append({
+            chunk_data = {
                 'chunk_id': f"{web_id}_{chunk_idx}",
                 'web_id': web_id,
                 'title': title,
@@ -125,7 +137,15 @@ class DocumentChunker:
                 # Дополнительные метаданные
                 'url': url,
                 'kind': kind,
-            })
+                'word_count': len(chunk_text.split()),
+                'char_count': len(chunk_text),
+            }
+            if entities:
+                chunk_data['entities'] = entities
+            if topics:
+                chunk_data['topics'] = topics
+
+            chunks.append(chunk_data)
 
             chunk_idx += 1
 
@@ -143,6 +163,7 @@ class DocumentChunker:
         Returns:
             DataFrame с чанками
         """
+        logger = get_logger(__name__)
         all_chunks = []
 
         for idx, row in df.iterrows():
@@ -152,7 +173,9 @@ class DocumentChunker:
                     row['web_id'],
                     row.get('title', ''),
                     row.get('url', ''),
-                    row.get('kind', '')
+                    row.get('kind', ''),
+                    row.get('entities', ''),
+                    row.get('topics', '')
                 )
             elif method == 'sentences':
                 chunks = self.chunk_by_sentences(
@@ -160,7 +183,9 @@ class DocumentChunker:
                     row['web_id'],
                     row.get('title', ''),
                     row.get('url', ''),
-                    row.get('kind', '')
+                    row.get('kind', ''),
+                    row.get('entities', ''),
+                    row.get('topics', '')
                 )
             else:
                 raise ValueError(f"Unknown chunking method: {method}")
@@ -168,8 +193,15 @@ class DocumentChunker:
             all_chunks.extend(chunks)
 
         chunks_df = pd.DataFrame(all_chunks)
-        print(f"Создано {len(chunks_df)} чанков из {len(df)} документов")
-        print(f"Среднее количество чанков на документ: {len(chunks_df) / len(df):.1f}")
+        logger.info(f"Создано {len(chunks_df)} чанков из {len(df)} документов (method={method})")
+        logger.info(f"Среднее чанков/док: {len(chunks_df) / max(len(df),1):.1f}")
+
+        # Разбивка по типу документа (kind) и базовой статистике размеров
+        if 'kind' in chunks_df.columns:
+            kind_counts = chunks_df['kind'].fillna('').value_counts().to_dict()
+            logger.info(f"Распределение по kind: {kind_counts}")
+        if 'chunk_index' in chunks_df.columns:
+            logger.debug(f"Макс индекс чанка: {chunks_df['chunk_index'].max()}")
 
         return chunks_df
 
@@ -195,7 +227,9 @@ def create_chunks_from_documents(documents_df: pd.DataFrame,
         chunk_overlap=chunk_overlap
     )
 
-    chunks_df = chunker.chunk_documents_dataframe(documents_df, method=method)
+    logger = get_logger(__name__)
+    with log_timing(logger, f"Чанкинг документов (method={method}, size={chunk_size}, overlap={chunk_overlap})"):
+        chunks_df = chunker.chunk_documents_dataframe(documents_df, method=method)
 
     return chunks_df
 

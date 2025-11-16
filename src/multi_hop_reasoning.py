@@ -27,6 +27,7 @@ Multi-hop Reasoning - итеративный поиск для сложных в
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from llama_cpp import Llama
+from src.logger import get_logger, log_timing
 
 
 class MultiHopReasoner:
@@ -49,7 +50,8 @@ class MultiHopReasoner:
         """
         self.max_hops = max_hops
 
-        print(f"[MultiHop] Загрузка LLM для multi-hop reasoning: {llm_model_path}")
+        self.logger = get_logger(__name__)
+        self.logger.info(f"[MultiHop] Загрузка LLM для multi-hop reasoning: {llm_model_path}")
 
         from src.config import LLM_CONTEXT_SIZE, LLM_GPU_LAYERS
 
@@ -61,7 +63,7 @@ class MultiHopReasoner:
             verbose=False
         )
 
-        print(f"[MultiHop] Инициализирован (max_hops={max_hops})")
+        self.logger.info(f"[MultiHop] Инициализирован (max_hops={max_hops})")
 
     def classify_question_complexity(self, query: str) -> Dict:
         """
@@ -121,7 +123,7 @@ class MultiHopReasoner:
             }
 
         except Exception as e:
-            print(f"[MultiHop] Ошибка классификации: {e}")
+            self.logger.warning(f"[MultiHop] Ошибка классификации: {e}")
             return {
                 'complexity': 'medium',
                 'needs_multi_hop': False,
@@ -198,7 +200,7 @@ class MultiHopReasoner:
             return sub_queries
 
         except Exception as e:
-            print(f"[MultiHop] Ошибка генерации подзапросов: {e}")
+            self.logger.warning(f"[MultiHop] Ошибка генерации подзапросов: {e}")
             return [query]  # fallback
 
     def _summarize_previous_results(self, results: List[Dict]) -> str:
@@ -285,7 +287,7 @@ class MultiHopReasoner:
             }
 
         except Exception as e:
-            print(f"[MultiHop] Ошибка проверки полноты: {e}")
+            self.logger.warning(f"[MultiHop] Ошибка проверки полноты: {e}")
             return {
                 'is_complete': len(all_results) >= 2,  # эвристика
                 'confidence': 0.5,
@@ -343,7 +345,8 @@ class MultiHopRAGPipeline:
         else:
             self.reasoner = None
 
-        print(f"[MultiHopRAG] Инициализирован (multi_hop={'ON' if enable_multi_hop else 'OFF'})")
+        self.logger = get_logger(__name__)
+        self.logger.info(f"[MultiHopRAG] Инициализирован (multi_hop={'ON' if enable_multi_hop else 'OFF'})")
 
     def search(self, query: str, k_dense: int = 25, k_bm25: int = 25,
               k_rerank: int = 20, top_n: int = 5) -> Dict:
@@ -362,14 +365,13 @@ class MultiHopRAGPipeline:
             complexity_info = self.reasoner.classify_question_complexity(query)
 
             if complexity_info['needs_multi_hop']:
-                print(f"[MultiHopRAG] Обнаружен сложный вопрос: {complexity_info['complexity']}")
-                print(f"[MultiHopRAG] Запуск multi-hop reasoning...")
+                self.logger.info(f"[MultiHopRAG] Обнаружен сложный вопрос: {complexity_info['complexity']} → multi-hop")
 
                 return self._multi_hop_search(
                     query, k_dense, k_bm25, k_rerank, top_n
                 )
             else:
-                print(f"[MultiHopRAG] Простой вопрос ({complexity_info['complexity']}), обычный поиск")
+                self.logger.info(f"[MultiHopRAG] Простой вопрос ({complexity_info['complexity']}) → обычный поиск")
 
         # Простой вопрос - обычный поиск
         return self.base_pipeline.search(query, k_dense, k_bm25, k_rerank, top_n)
@@ -390,16 +392,14 @@ class MultiHopRAGPipeline:
         all_results_raw = []
 
         for hop in range(1, self.max_hops + 1):
-            print(f"\n[MultiHop] === Итерация {hop}/{self.max_hops} ===")
+            self.logger.info(f"[MultiHop] Итерация {hop}/{self.max_hops}")
 
             # Генерируем подзапросы
             sub_queries = self.reasoner.generate_sub_queries(
                 query, hop, all_results_raw
             )
 
-            print(f"[MultiHop] Подзапросы ({len(sub_queries)}):")
-            for i, sq in enumerate(sub_queries, 1):
-                print(f"  {i}. {sq}")
+            self.logger.debug(f"[MultiHop] Подзапросы ({len(sub_queries)}): {sub_queries}")
 
             # Выполняем поиск для каждого подзапроса
             hop_results = []
@@ -422,14 +422,14 @@ class MultiHopRAGPipeline:
             # Проверяем полноту
             if hop < self.max_hops:
                 completeness = self.reasoner.check_completeness(query, all_results)
-                print(f"[MultiHop] Полнота: {completeness['is_complete']} (confidence: {completeness['confidence']:.2f})")
+                self.logger.info(f"[MultiHop] Полнота: {completeness['is_complete']} (confidence: {completeness['confidence']:.2f})")
 
                 if completeness['is_complete'] and completeness['confidence'] > 0.7:
-                    print(f"[MultiHop] Информация достаточна, останавливаем поиск")
+                    self.logger.info(f"[MultiHop] Информация достаточна, останов")
                     break
 
         # Объединяем все итерации
-        print(f"\n[MultiHop] Объединение {len(all_results)} итераций...")
+        self.logger.info(f"[MultiHop] Объединение {len(all_results)} итераций...")
         final_results = self.reasoner.merge_multi_hop_results(all_results)
 
         # Выбираем топ документы

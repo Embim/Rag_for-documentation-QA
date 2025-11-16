@@ -22,6 +22,7 @@ Context Window - добавление соседних чанков для по�
 """
 import pandas as pd
 from typing import List, Dict, Tuple
+from src.logger import get_logger
 
 
 class ContextWindowExpander:
@@ -35,8 +36,8 @@ class ContextWindowExpander:
                         2 = ±2 чанка (всего 5)
         """
         self.window_size = window_size
-        print(f"[ContextWindow] Инициализация с window_size={window_size}")
-        print(f"               Для каждого чанка добавляем {2*window_size} соседей")
+        self.logger = get_logger(__name__)
+        self.logger.info(f"[ContextWindow] Инициализация (window_size={window_size}, neighbors={2*window_size})")
 
     def expand_with_neighbors(self,
                              chunks_df: pd.DataFrame,
@@ -132,7 +133,9 @@ class ContextWindowExpander:
             ascending=[False] + [True] * (len(sort_keys) - 1)
         )
 
-        return expanded_df.reset_index(drop=True)
+        expanded_df = expanded_df.reset_index(drop=True)
+        self.logger.debug(f"[ContextWindow] Расширено до {len(expanded_df)} чанков")
+        return expanded_df
 
     def get_context_groups(self, expanded_chunks: pd.DataFrame) -> Dict[str, List[Dict]]:
         """
@@ -196,7 +199,9 @@ class ContextWindowExpander:
 
             merged_chunks.append(merged_chunk)
 
-        return pd.DataFrame(merged_chunks)
+        out = pd.DataFrame(merged_chunks)
+        self.logger.debug(f"[ContextWindow] Объединено в {len(out)} чанков")
+        return out
 
 
 def demonstrate_context_window():

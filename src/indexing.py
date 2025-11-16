@@ -263,9 +263,13 @@ class WeaviateIndexer:
                     Property(name="web_id", data_type=DataType.INT),
                     Property(name="title", data_type=DataType.TEXT),
                     Property(name="text", data_type=DataType.TEXT),
-                    # Дополнительные метаданные из websites.csv
+                    # Дополнительные метаданные из websites.csv и LLM-clean
                     Property(name="url", data_type=DataType.TEXT),
                     Property(name="kind", data_type=DataType.TEXT),
+                    Property(name="entities", data_type=DataType.TEXT),
+                    Property(name="topics", data_type=DataType.TEXT),
+                    Property(name="word_count", data_type=DataType.INT),
+                    Property(name="char_count", data_type=DataType.INT),
                     # Информация о чанке
                     Property(name="chunk_index", data_type=DataType.INT),  # номер чанка в документе
                 ]
@@ -370,6 +374,16 @@ class WeaviateIndexer:
                         "chunk_index": chunk_index,
                     }
 
+                    # Опциональные дополнительные свойства
+                    if 'entities' in row and pd.notna(row['entities']):
+                        properties["entities"] = str(row['entities'])
+                    if 'topics' in row and pd.notna(row['topics']):
+                        properties["topics"] = str(row['topics'])
+                    if 'word_count' in row and pd.notna(row['word_count']):
+                        properties["word_count"] = int(row['word_count'])
+                    if 'char_count' in row and pd.notna(row['char_count']):
+                        properties["char_count"] = int(row['char_count'])
+
                     batch.add_object(
                         properties=properties,
                         vector=embedding.tolist()
@@ -429,6 +443,10 @@ class WeaviateIndexer:
                 'url': obj.properties.get('url', ''),
                 'kind': obj.properties.get('kind', ''),
                 'chunk_index': obj.properties.get('chunk_index', 0),
+                'entities': obj.properties.get('entities', ''),
+                'topics': obj.properties.get('topics', ''),
+                'word_count': obj.properties.get('word_count', None),
+                'char_count': obj.properties.get('char_count', None),
             })
 
         return scores, results
@@ -471,6 +489,10 @@ class WeaviateIndexer:
                 'url': obj.properties.get('url', ''),
                 'kind': obj.properties.get('kind', ''),
                 'chunk_index': obj.properties.get('chunk_index', 0),
+                'entities': obj.properties.get('entities', ''),
+                'topics': obj.properties.get('topics', ''),
+                'word_count': obj.properties.get('word_count', None),
+                'char_count': obj.properties.get('char_count', None),
             })
 
         return scores, results

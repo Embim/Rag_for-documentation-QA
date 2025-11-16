@@ -16,6 +16,7 @@ from itertools import product
 from tqdm import tqdm
 from typing import Dict, Tuple
 import src.config as config
+from src.logger import get_logger, log_timing
 
 
 class GridSearchOptimizer:
@@ -66,8 +67,9 @@ class GridSearchOptimizer:
             len(param_grid["HYBRID_ALPHA"])
         )
 
-        print(f"\n📊 Grid Search режим: {mode}")
-        print(f"   Всего комбинаций: {total_combinations}")
+        logger = get_logger(__name__)
+        logger.info(f"📊 Grid Search режим: {mode}")
+        logger.info(f"Всего комбинаций: {total_combinations}")
 
         return param_grid
 
@@ -140,9 +142,9 @@ class GridSearchOptimizer:
         keys = list(param_grid.keys())
         combinations = list(product(*[param_grid[k] for k in keys]))
 
-        print(f"\n🔍 Запуск Grid Search...")
-        print(f"   Комбинаций: {len(combinations)}")
-        print(f"   Вопросов в выборке: {len(self.questions_df)}")
+        logger = get_logger(__name__)
+        logger.info("🔍 Запуск Grid Search...")
+        logger.info(f"Комбинаций: {len(combinations)} | Вопросов в выборке: {len(self.questions_df)}")
 
         # Результаты
         results = []
@@ -153,7 +155,8 @@ class GridSearchOptimizer:
             params = dict(zip(keys, combo))
 
             # Оценка
-            score = self.evaluate_params(params)
+            with log_timing(logger, f"Оценка параметров {params}"):
+                score = self.evaluate_params(params)
 
             # Сохраняем
             result = {**params, "avg_score": score}
@@ -175,11 +178,9 @@ class GridSearchOptimizer:
         Args:
             best_params: словарь с лучшими параметрами
         """
-        print(f"\n⭐ ЛУЧШИЕ ПАРАМЕТРЫ:")
-        print(f"   TOP_K_DENSE:   {best_params['TOP_K_DENSE']}")
-        print(f"   TOP_K_BM25:    {best_params['TOP_K_BM25']}")
-        print(f"   TOP_K_RERANK:  {best_params['TOP_K_RERANK']}")
-        print(f"   HYBRID_ALPHA:  {best_params['HYBRID_ALPHA']:.2f}")
+        logger = get_logger(__name__)
+        logger.info("⭐ ЛУЧШИЕ ПАРАМЕТРЫ:")
+        logger.info(f"TOP_K_DENSE={best_params['TOP_K_DENSE']}, TOP_K_BM25={best_params['TOP_K_BM25']}, TOP_K_RERANK={best_params['TOP_K_RERANK']}, HYBRID_ALPHA={best_params['HYBRID_ALPHA']:.2f}")
 
         # Применяем к config
         config.TOP_K_DENSE = best_params['TOP_K_DENSE']
@@ -187,7 +188,7 @@ class GridSearchOptimizer:
         config.TOP_K_RERANK = best_params['TOP_K_RERANK']
         config.HYBRID_ALPHA = best_params['HYBRID_ALPHA']
 
-        print(f"\n✅ Параметры применены к config!")
+        logger.info("✅ Параметры применены к config")
 
 
 def optimize_rag_params(retriever, questions_df: pd.DataFrame,
@@ -211,9 +212,10 @@ def optimize_rag_params(retriever, questions_df: pd.DataFrame,
     else:
         sample_df = questions_df
 
-    print(f"\n{'='*80}")
-    print(f"GRID SEARCH ОПТИМИЗАЦИЯ RAG ПАРАМЕТРОВ")
-    print(f"{'='*80}")
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("GRID SEARCH ОПТИМИЗАЦИЯ RAG ПАРАМЕТРОВ")
+    logger.info("="*80)
 
     # Создаем optimizer
     optimizer = GridSearchOptimizer(retriever, sample_df)
@@ -225,8 +227,8 @@ def optimize_rag_params(retriever, questions_df: pd.DataFrame,
     best_params, results_df = optimizer.search(param_grid)
 
     # Показываем результаты
-    print(f"\n📊 Топ-5 конфигураций:")
-    print(results_df.head(5).to_string())
+    logger.info("📊 Топ-5 конфигураций:")
+    logger.info("\n" + results_df.head(5).to_string())
 
     # Применяем лучшие параметры
     optimizer.apply_best_params(best_params)
