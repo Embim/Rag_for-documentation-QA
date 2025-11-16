@@ -327,7 +327,11 @@ class LLMDocumentCleanerAPI:
             try:
                 raw_response, response_text = self._call_api(prompt)
                 raw_json_response = raw_response  # Сохраняем сырой ответ для логирования
-                
+
+                # DEBUG: логируем длину ответа
+                if self.verbose and len(raw_response) > 5000:
+                    print(f"  ⚠️  Длинный ответ от API: {len(raw_response)} символов (может быть обрезан в логе)")
+
                 # Удаляем markdown код-блоки (```json ... ```)
                 # Модели часто возвращают JSON в markdown формате
                 # Важно: обрабатываем из raw_response, т.к. _extract_final_answer мог удалить часть текста
@@ -362,7 +366,13 @@ class LLMDocumentCleanerAPI:
                 
                 # Парсинг JSON (улучшенная логика с обработкой reasoning)
                 raw_result = None
-                
+
+                # DEBUG: логируем info о тексте для парсинга
+                if self.verbose and len(response_text) > 1000:
+                    first_100 = response_text[:100].replace('\n', '\\n')
+                    last_100 = response_text[-100:].replace('\n', '\\n')
+                    print(f"  🔍 Парсинг JSON. Длина: {len(response_text)}, начало: {first_100}..., конец: ...{last_100}")
+
                 # Стратегия 1: ищем первый валидный JSON объект, начиная с первой {
                 first_brace = response_text.find('{')
                 if first_brace != -1:
@@ -376,12 +386,16 @@ class LLMDocumentCleanerAPI:
                             if brace_count == 0:
                                 last_brace = i
                                 break
-                    
+
                     if last_brace != -1:
                         try:
                             json_str = response_text[first_brace:last_brace + 1]
                             raw_result = json.loads(json_str)
-                        except json.JSONDecodeError:
+                            if self.verbose:
+                                print(f"  ✅ JSON извлечен (стратегия 1: balanced braces)")
+                        except json.JSONDecodeError as e:
+                            if self.verbose:
+                                print(f"  ❌ Стратегия 1 failed: {e}")
                             pass
                 
                 # Стратегия 2: если не получилось, пробуем найти JSON между первыми { и последними }
@@ -442,19 +456,24 @@ class LLMDocumentCleanerAPI:
                     # Сохраняем web_id если был передан
                     if web_id is not None:
                         raw_result["web_id"] = web_id
-                    
+
                     # Кэширование
                     if len(self._cache) >= self._cache_max_size:
                         oldest_key = next(iter(self._cache))
                         del self._cache[oldest_key]
                     self._cache[text_hash] = raw_result.copy()
-                    
+
                     # Логируем результат с сырым JSON ответом
                     self._log_llm_result(raw_result, original_text=text_truncated, raw_json_response=raw_json_response)
-                    
+
                     return raw_result
                 else:
                     # Fallback если JSON не найден
+                    # DEBUG: логируем первые 500 символов ответа для отладки
+                    if self.verbose:
+                        print(f"  ⚠️  JSON парсинг провалился. Первые 500 символов ответа:")
+                        print(f"     {response_text[:500]}")
+
                     fallback = self._fallback_result(text_truncated, web_id=web_id)
                     self._log_llm_result(fallback, original_text=text_truncated, reason="json_parse_failed", raw_json_response=raw_json_response)
                     return fallback
@@ -533,8 +552,10 @@ class LLMDocumentCleanerAPI:
             
             # Добавляем сырой JSON ответ от API (если доступен)
             if raw_json_response is not None:
-                # Ограничиваем длину сырого ответа (первые 5000 символов для отладки)
-                log_record["raw_json_response"] = raw_json_response[:5000]
+                # Ограничиваем длину сырого ответа (первые 10000 символов для отладки)
+                log_record["raw_json_response"] = raw_json_response[:10000]
+                # Добавляем полную длину ответа для статистики
+                log_record["response_length"] = len(raw_json_response)
             
             self.llm_logger.info(json.dumps(log_record, ensure_ascii=False))
             
@@ -941,8 +962,10 @@ JSON:
             
             # Добавляем сырой JSON ответ от API (если доступен)
             if raw_json_response is not None:
-                # Ограничиваем длину сырого ответа (первые 5000 символов для отладки)
-                log_record["raw_json_response"] = raw_json_response[:5000]
+                # Ограничиваем длину сырого ответа (первые 10000 символов для отладки)
+                log_record["raw_json_response"] = raw_json_response[:10000]
+                # Добавляем полную длину ответа для статистики
+                log_record["response_length"] = len(raw_json_response)
             self.llm_logger.info(json.dumps(log_record, ensure_ascii=False))
             
             # Принудительно сбрасываем буферы всех хендлеров
