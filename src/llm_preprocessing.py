@@ -231,10 +231,53 @@ class LLMDocumentCleaner:
 
             response_text = response['choices'][0]['text']
 
-            # Извлекаем JSON из ответа
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                raw_result = json.loads(json_match.group(0))
+            # Извлекаем JSON из ответа (более устойчивый парсинг)
+            # Пробуем несколько стратегий:
+            raw_result = None
+            
+            # Стратегия 1: ищем первый валидный JSON объект, начиная с первой {
+            # Используем жадный поиск первого JSON объекта
+            first_brace = response_text.find('{')
+            if first_brace != -1:
+                # Пробуем найти закрывающую скобку, начиная с позиции первой {
+                # Идем от конца к началу, чтобы найти правильную закрывающую скобку
+                brace_count = 0
+                last_brace = -1
+                for i in range(first_brace, len(response_text)):
+                    if response_text[i] == '{':
+                        brace_count += 1
+                    elif response_text[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            last_brace = i
+                            break
+                
+                if last_brace != -1:
+                    try:
+                        json_str = response_text[first_brace:last_brace + 1]
+                        raw_result = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Стратегия 2: если не получилось, пробуем найти JSON между первыми { и последними }
+            if raw_result is None:
+                first_brace = response_text.find('{')
+                last_brace = response_text.rfind('}')
+                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    try:
+                        json_str = response_text[first_brace:last_brace + 1]
+                        raw_result = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Стратегия 3: пробуем парсить весь ответ как JSON (на случай если там только JSON)
+            if raw_result is None:
+                try:
+                    raw_result = json.loads(response_text.strip())
+                except json.JSONDecodeError:
+                    pass
+            
+            if raw_result:
                 # Нормализация полей под downstream:
                 # заполняем отсутствующие поля пустыми структурами
                 raw_result.setdefault("clean_text", text_truncated)
