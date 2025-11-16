@@ -6,8 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
-# Директория для моделей
-MODELS_DIR = Path(__file__).parent / "models"
+# Директория для моделей (в корне проекта, на одном уровне со scripts/)
+MODELS_DIR = Path(__file__).parent.parent / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Список моделей для скачивания
