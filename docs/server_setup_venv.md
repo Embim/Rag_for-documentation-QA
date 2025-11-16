@@ -217,6 +217,11 @@ export LOG_FILE=pipeline.log      # файл логов (будет создан
 
 ## 7) Запуск пайплайна
 
+# API режим (автоматически для reranking)
+export LLM_MODE=api
+export LLM_API_MODEL=tngtech/deepseek-r1t2-chimera:free
+export OPENROUTER_API_KEY=sk-or-v1-...  # опционально
+
 ```bash
 cd /path/to/alfa-rag
 source .venv/bin/activate

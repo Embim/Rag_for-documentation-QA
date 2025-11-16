@@ -45,6 +45,9 @@ from src.config import (
     LLM_JUDGE_TEMPERATURE,
     LLM_JUDGE_MAX_TOKENS,
     LLM_GPU_LAYERS,
+    LLM_MODE,
+    LLM_API_MODEL,
+    OPENROUTER_API_KEY,
     MODELS_DIR
 )
 
@@ -127,44 +130,79 @@ class SubquestionAnalyzer:
 class CoverageJudge:
     """LLM Judge для оценки полноты контекста"""
 
-    def __init__(self, model_path: str = None):
+    def __init__(self, model_path: str = None, use_api: bool = None):
         """
         Args:
-            model_path: путь к GGUF файлу модели
+            model_path: путь к GGUF файлу модели (для локального режима)
+            use_api: использовать ли API (если None - определяется из LLM_MODE)
         """
-        if not LLAMA_CPP_AVAILABLE:
-            raise ImportError(
-                "llama-cpp-python не установлен. "
-                "Установите: pip install llama-cpp-python"
+        # Определяем режим работы
+        if use_api is None:
+            use_api = (LLM_MODE == "api")
+        
+        self.use_api = use_api
+        
+        if use_api:
+            # API режим (OpenRouter)
+            print(f"Инициализация LLM Judge (API режим, модель: {LLM_API_MODEL})")
+            try:
+                from openai import OpenAI
+                base_url = "https://openrouter.ai/api/v1"
+                api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"
+                
+                default_headers = {}
+                if OPENROUTER_API_KEY:
+                    default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+                default_headers["HTTP-Referer"] = "https://github.com/your-repo"
+                default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+                
+                self.client = OpenAI(
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=60,
+                    default_headers=default_headers
+                )
+                self.model_name = LLM_API_MODEL
+                self.llm = None  # для совместимости с SubquestionAnalyzer
+                self.analyzer = SubquestionAnalyzer(llm_model=None)  # используем эвристики для API
+                print(f"LLM Judge (API) инициализирован")
+            except ImportError:
+                raise ImportError("Установите openai: pip install openai")
+        else:
+            # Локальный режим
+            if not LLAMA_CPP_AVAILABLE:
+                raise ImportError(
+                    "llama-cpp-python не установлен. "
+                    "Установите: pip install llama-cpp-python"
+                )
+
+            # Определяем путь к модели
+            if model_path is None:
+                model_path = MODELS_DIR / LLM_JUDGE_FILE
+
+            model_path = Path(model_path)
+
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"Модель не найдена: {model_path}\n"
+                    f"Скачайте модель с HuggingFace:\n"
+                    f"huggingface-cli download {LLM_JUDGE_MODEL} {LLM_JUDGE_FILE} "
+                    f"--local-dir {MODELS_DIR}"
+                )
+
+            print(f"Загрузка LLM Judge модели: {model_path}")
+
+            # Загружаем модель
+            self.llm = Llama(
+                model_path=str(model_path),
+                n_ctx=LLM_JUDGE_CONTEXT_SIZE,
+                n_gpu_layers=LLM_GPU_LAYERS,  # используем настройку из config
+                verbose=False
             )
 
-        # Определяем путь к модели
-        if model_path is None:
-            model_path = MODELS_DIR / LLM_JUDGE_FILE
+            self.analyzer = SubquestionAnalyzer(llm_model=self.llm)
 
-        model_path = Path(model_path)
-
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Модель не найдена: {model_path}\n"
-                f"Скачайте модель с HuggingFace:\n"
-                f"huggingface-cli download {LLM_JUDGE_MODEL} {LLM_JUDGE_FILE} "
-                f"--local-dir {MODELS_DIR}"
-            )
-
-        print(f"Загрузка LLM Judge модели: {model_path}")
-
-        # Загружаем модель
-        self.llm = Llama(
-            model_path=str(model_path),
-            n_ctx=LLM_JUDGE_CONTEXT_SIZE,
-            n_gpu_layers=LLM_GPU_LAYERS,  # используем настройку из config
-            verbose=False
-        )
-
-        self.analyzer = SubquestionAnalyzer(llm_model=self.llm)
-
-        print(f"LLM Judge загружен успешно (GPU layers: {LLM_GPU_LAYERS})")
+            print(f"LLM Judge загружен успешно (GPU layers: {LLM_GPU_LAYERS})")
 
     def evaluate_coverage(
         self,
@@ -208,15 +246,27 @@ class CoverageJudge:
         prompt = self._build_coverage_prompt(question, subquestions, context)
 
         # Получаем оценку от LLM
-        response = self.llm.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=LLM_JUDGE_TEMPERATURE,
-            max_tokens=LLM_JUDGE_MAX_TOKENS
-        )
+        if self.use_api:
+            # API режим
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=LLM_JUDGE_TEMPERATURE,
+                max_tokens=LLM_JUDGE_MAX_TOKENS
+            )
+            content = response.choices[0].message.content
+        else:
+            # Локальный режим
+            response = self.llm.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=LLM_JUDGE_TEMPERATURE,
+                max_tokens=LLM_JUDGE_MAX_TOKENS
+            )
+            content = response['choices'][0]['message']['content']
 
         # Парсим ответ
         result = self._parse_coverage_response(
-            response['choices'][0]['message']['content'],
+            content,
             subquestions
         )
 
@@ -453,12 +503,13 @@ ADDATIVE SCORING (числовая шкала):
 _judge_instance = None
 
 
-def get_coverage_judge(model_path: str = None) -> CoverageJudge:
+def get_coverage_judge(model_path: str = None, use_api: bool = None) -> CoverageJudge:
     """
     Получить singleton экземпляр CoverageJudge
 
     Args:
-        model_path: путь к модели (опционально)
+        model_path: путь к модели (опционально, для локального режима)
+        use_api: использовать ли API (если None - определяется из LLM_MODE)
 
     Returns:
         CoverageJudge instance
@@ -466,7 +517,7 @@ def get_coverage_judge(model_path: str = None) -> CoverageJudge:
     global _judge_instance
 
     if _judge_instance is None:
-        _judge_instance = CoverageJudge(model_path)
+        _judge_instance = CoverageJudge(model_path=model_path, use_api=use_api)
 
     return _judge_instance
 

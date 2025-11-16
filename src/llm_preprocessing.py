@@ -28,9 +28,273 @@ from src.config import (
     LLM_MAX_TOKENS,
     LLM_N_BATCH,
     LLM_N_THREADS,
+    LLM_MODE,
+    LLM_API_MODEL,
+    LLM_API_MAX_WORKERS,
+    LLM_API_TIMEOUT,
+    LLM_API_RETRIES,
+    OPENROUTER_API_KEY,
     MODELS_DIR,
     OUTPUTS_DIR,
 )
+
+
+class LLMDocumentCleanerAPI:
+    """
+    API-based очистка документов через OpenRouter
+    
+    OpenRouter предоставляет единый API для доступа к 400+ моделям:
+    - OpenAI (GPT-4, GPT-3.5)
+    - Anthropic (Claude)
+    - Google (Gemini)
+    - Meta (Llama)
+    - DeepSeek (R1T2 Chimera - бесплатно!)
+    - И многие другие
+    
+    Преимущества:
+    - Параллельные запросы (ускорение в 10-20 раз)
+    - Не занимает VRAM
+    - Быстрее локальной модели
+    - Бесплатные модели доступны (DeepSeek R1T2 Chimera)
+    
+    Рекомендуется: DeepSeek R1T2 Chimera (бесплатно, быстрая, хорошее качество)
+    """
+    
+    def __init__(self, verbose: bool = True):
+        """
+        Args:
+            verbose: выводить прогресс
+        """
+        self.verbose = verbose
+        self.model = LLM_API_MODEL
+        self.max_workers = LLM_API_MAX_WORKERS
+        self.timeout = LLM_API_TIMEOUT
+        self.retries = LLM_API_RETRIES
+        
+        # Кэш для похожих документов
+        self._cache = {}
+        self._cache_max_size = 100
+        
+        # Инициализация API клиента
+        self.client = None
+        self._init_api_client()
+        
+        # Логгер
+        self.llm_logger = logging.getLogger("llm_cleaning")
+        self._init_llm_logger()
+        
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"📡 Инициализация LLM Document Cleaner (OpenRouter API)")
+            print(f"   Модель: {self.model}")
+            print(f"   Параллельных запросов: {self.max_workers}")
+            print(f"{'='*80}\n")
+    
+    def _init_api_client(self):
+        """Инициализация OpenRouter API клиента"""
+        # OpenRouter использует OpenAI-совместимый API
+        # API ключ опционален для бесплатных моделей, но рекомендуется
+        try:
+            from openai import OpenAI
+            # OpenRouter endpoint
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"  # можно без ключа для бесплатных моделей
+            
+            # Заголовки для OpenRouter
+            default_headers = {}
+            if OPENROUTER_API_KEY:
+                default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+            # Опционально: для отображения в лидербордах
+            default_headers["HTTP-Referer"] = "https://github.com/your-repo"  # можно изменить
+            default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+            
+            self.client = OpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=self.timeout,
+                default_headers=default_headers
+            )
+        except ImportError:
+            raise ImportError("Установите openai: pip install openai")
+    
+    def _init_llm_logger(self):
+        """Инициализация логгера для LLM результатов"""
+        if not self.llm_logger.handlers:
+            log_file = OUTPUTS_DIR / "llm_cleaning.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            handler = RotatingFileHandler(
+                log_file,
+                maxBytes=10 * 1024 * 1024,  # 10 MB
+                backupCount=5,
+                encoding='utf-8'
+            )
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            ))
+            self.llm_logger.addHandler(handler)
+            self.llm_logger.setLevel(logging.INFO)
+    
+    def _call_api(self, prompt: str) -> str:
+        """Вызов OpenRouter API"""
+        # OpenRouter использует OpenAI-совместимый API
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=LLM_MAX_TOKENS,
+        )
+        return response.choices[0].message.content
+    
+    def _preprocess_text_before_llm(self, text: str) -> str:
+        """Агрессивная предобработка текста (та же логика что и в локальной версии)"""
+        if not text:
+            return ""
+        
+        patterns_to_remove = [
+            r'(?i)(главная|назад|вверх|поделиться|следите за нами|подписаться)',
+            r'(?i)(меню|навигация|breadcrumb|хлебные крошки)',
+            r'©\s*\d{4}[-\s]*\d{4}.*?',
+            r'(?i)(все права защищены|лицензия|лицензия цб рф)',
+            r'(?i)(юридический адрес|офис|контакты).*?(?=\n\n|\Z)',
+            r'(?i)(откройте карту сегодня|узнайте больше|оставьте заявку|оформить онлайн)',
+            r'(?i)(скачать приложение|app store|google play)',
+            r'(?i)(подпишитесь|рассылка|новости)',
+            r'(?i)(cookie|cookies|использование cookie)',
+            r'(?i)(согласие на обработку|политика конфиденциальности)',
+            r'(?i)(нажмите здесь|перейдите по ссылке|смотрите также|читайте также)',
+            r'(?i)(подробнее|детали|узнать больше)',
+            r'[-=]{3,}',
+            r'_{3,}',
+            r'\n{3,}',
+        ]
+        
+        for pattern in patterns_to_remove:
+            text = re.sub(pattern, ' ', text, flags=re.MULTILINE)
+        
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+    
+    def clean_document(self, text: str) -> Dict:
+        """Очистка одного документа через API"""
+        # Предобработка
+        text_preprocessed = self._preprocess_text_before_llm(text)
+        
+        if len(text_preprocessed.strip()) < 100:
+            return self._fallback_result(text_preprocessed)
+        
+        # Проверка кэша
+        text_hash = hashlib.md5(text_preprocessed[:2000].encode('utf-8')).hexdigest()
+        if text_hash in self._cache:
+            return self._cache[text_hash].copy()
+        
+        # Сокращенный промпт
+        text_truncated = text_preprocessed[:2500]
+        prompt = f"""Очисти банковский документ и верни JSON:
+
+ДОКУМЕНТ:
+{text_truncated}
+
+ЗАДАЧИ:
+1. Удали: навигацию, футеры, рекламу, cookie-баннеры, технические блоки
+2. Сохрани: описания продуктов, инструкции, числовые параметры (комиссии, лимиты, сроки)
+3. Темы (макс 3): кредитные_карты, дебетовые_карты, переводы, жкх, кэшбэк, счета_реквизиты, комиссии, лимиты, безопасность, мобильное_приложение, альфа_онлайн, ипотека, кредиты, вклады, инвестиции, страхование
+4. Полезность: 0.0-0.3 (мусор), 0.4-0.6 (частично), 0.7-1.0 (конкретика)
+
+JSON:
+{{
+  "clean_text": "очищенный текст",
+  "topics": ["тема_1", "тема_2"],
+  "usefulness_score": 0.0
+}}"""
+        
+        # Вызов API с повторными попытками
+        for attempt in range(self.retries):
+            try:
+                response_text = self._call_api(prompt)
+                
+                # Парсинг JSON (та же логика что и в локальной версии)
+                raw_result = None
+                first_brace = response_text.find('{')
+                if first_brace != -1:
+                    brace_count = 0
+                    last_brace = -1
+                    for i in range(first_brace, len(response_text)):
+                        if response_text[i] == '{':
+                            brace_count += 1
+                        elif response_text[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                last_brace = i
+                                break
+                    
+                    if last_brace != -1:
+                        try:
+                            json_str = response_text[first_brace:last_brace + 1]
+                            raw_result = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            pass
+                
+                if raw_result is None:
+                    first_brace = response_text.find('{')
+                    last_brace = response_text.rfind('}')
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        try:
+                            json_str = response_text[first_brace:last_brace + 1]
+                            raw_result = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            pass
+                
+                if raw_result is None:
+                    try:
+                        raw_result = json.loads(response_text.strip())
+                    except json.JSONDecodeError:
+                        pass
+                
+                if raw_result:
+                    raw_result.setdefault("clean_text", text_truncated)
+                    raw_result.setdefault("topics", [])
+                    raw_result.setdefault("usefulness_score", 0.5)
+                    raw_result.setdefault("products", [])
+                    raw_result.setdefault("actions", [])
+                    raw_result.setdefault("conditions", [])
+                    raw_result["is_useful"] = bool(raw_result.get("usefulness_score", 0.5) >= 0.3)
+                    
+                    # Кэширование
+                    if len(self._cache) >= self._cache_max_size:
+                        oldest_key = next(iter(self._cache))
+                        del self._cache[oldest_key]
+                    self._cache[text_hash] = raw_result.copy()
+                    
+                    return raw_result
+                else:
+                    return self._fallback_result(text_truncated)
+            
+            except Exception as e:
+                if attempt < self.retries - 1:
+                    if self.verbose:
+                        print(f"  ⚠️  Ошибка API (попытка {attempt + 1}/{self.retries}): {e}")
+                    continue
+                else:
+                    if self.verbose:
+                        print(f"  ⚠️  Ошибка API после {self.retries} попыток: {e}")
+                    return self._fallback_result(text_truncated)
+        
+        return self._fallback_result(text_truncated)
+    
+    def _fallback_result(self, text: str) -> Dict:
+        """Fallback результат если API не сработал"""
+        return {
+            "clean_text": text,
+            "topics": [],
+            "usefulness_score": 0.5,
+            "products": [],
+            "actions": [],
+            "conditions": [],
+            "is_useful": True
+        }
 
 
 class LLMDocumentCleaner:

@@ -130,6 +130,10 @@ CROSS_ENCODER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # multilingu
 # "cross-encoder/ms-marco-MiniLM-L-6-v2" - очень быстрая (English)
 
 # Параметры LLM (используется И для предочистки И для reranking)
+# ВЫБОР РЕЖИМА: локальная модель или API
+LLM_MODE = os.environ.get("LLM_MODE", "local")  # "local" или "api" (openai/yandex/gigachat)
+
+# === ЛОКАЛЬНАЯ МОДЕЛЬ (llama-cpp) ===
 # ЕДИНАЯ МОДЕЛЬ: Qwen3-32B для всех задач
 # A100 80GB оптимизация: используем IQ4_NL для баланса скорости и качества
 # Варианты:
@@ -144,6 +148,22 @@ LLM_MAX_TOKENS = 1024  # уменьшено для ускорения (было 
 LLM_GPU_LAYERS = -1  # -1 = все слои на GPU, 0 = только CPU
 LLM_N_BATCH = 1024  # увеличен для ускорения (было 512, больше = быстрее на GPU)
 LLM_N_THREADS = 16  # увеличено для CPU части (было 8, больше потоков = быстрее)
+
+# === API РЕЖИМ (OpenRouter) ===
+# OpenRouter предоставляет единый API для доступа к 400+ моделям
+# Поддерживает OpenAI, Anthropic, Google, Meta и многие другие модели
+LLM_API_PROVIDER = "openrouter"  # только OpenRouter
+LLM_API_MODEL = os.environ.get("LLM_API_MODEL", "tngtech/deepseek-r1t2-chimera:free")  # бесплатная модель по умолчанию
+# Другие модели OpenRouter: https://openrouter.ai/models
+# Примеры: "openai/gpt-4o-mini", "anthropic/claude-3-haiku", "meta-llama/llama-3.2-3b-instruct:free"
+
+# API ключ (опционально для бесплатных моделей, но рекомендуется)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")  # получи на https://openrouter.ai/keys
+
+# Параметры параллельных запросов к API
+LLM_API_MAX_WORKERS = int(os.environ.get("LLM_API_MAX_WORKERS", "10"))  # количество параллельных запросов к API
+LLM_API_TIMEOUT = int(os.environ.get("LLM_API_TIMEOUT", "60"))  # таймаут запроса в секундах
+LLM_API_RETRIES = int(os.environ.get("LLM_API_RETRIES", "3"))  # количество повторных попыток при ошибке
 
 # Финальные результаты
 TOP_N_DOCUMENTS = 5  # количество документов в финальном ответе

@@ -473,32 +473,67 @@ class HybridRetriever:
 class LLMReranker:
     """LLM-based реранкер для оценки релевантности документов"""
 
-    def __init__(self, model_path: str = None):
+    def __init__(self, model_path: str = None, use_api: bool = None):
         """
         Args:
-            model_path: путь к GGUF модели
+            model_path: путь к GGUF модели (для локального режима)
+            use_api: использовать ли API (если None - определяется из LLM_MODE)
         """
-        if not LLAMA_CPP_AVAILABLE:
-            raise ImportError(
-                "llama-cpp-python не доступен. "
-                "Проверьте установку: pip list | grep llama"
+        from src.config import LLM_MODE, LLM_API_MODEL, OPENROUTER_API_KEY
+        
+        # Определяем режим работы
+        if use_api is None:
+            use_api = (LLM_MODE == "api")
+        
+        self.use_api = use_api
+        
+        if use_api:
+            # API режим (OpenRouter)
+            logging.getLogger(__name__).info(f"Инициализация LLM Reranker (API режим, модель: {LLM_API_MODEL})")
+            try:
+                from openai import OpenAI
+                base_url = "https://openrouter.ai/api/v1"
+                api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"
+                
+                default_headers = {}
+                if OPENROUTER_API_KEY:
+                    default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+                default_headers["HTTP-Referer"] = "https://github.com/your-repo"
+                default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+                
+                self.client = OpenAI(
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=60,
+                    default_headers=default_headers
+                )
+                self.model_name = LLM_API_MODEL
+                logging.getLogger(__name__).info(f"LLM Reranker (API) инициализирован")
+            except ImportError:
+                raise ImportError("Установите openai: pip install openai")
+        else:
+            # Локальный режим
+            if not LLAMA_CPP_AVAILABLE:
+                raise ImportError(
+                    "llama-cpp-python не доступен. "
+                    "Проверьте установку: pip list | grep llama"
+                )
+
+            if model_path is None:
+                model_path = str(MODELS_DIR / LLM_MODEL_FILE)
+
+            logging.getLogger(__name__).info(f"Загрузка LLM reranker модели: {model_path}")
+
+            self.model = Llama(
+                model_path=model_path,
+                n_ctx=LLM_CONTEXT_SIZE,
+                n_gpu_layers=LLM_GPU_LAYERS,
+                n_batch=512,  # Размер батча для обработки токенов
+                n_threads=8,  # Количество CPU потоков
+                use_mlock=True,  # Блокировка памяти для скорости
+                verbose=False
             )
-
-        if model_path is None:
-            model_path = str(MODELS_DIR / LLM_MODEL_FILE)
-
-        logging.getLogger(__name__).info(f"Загрузка LLM reranker модели: {model_path}")
-
-        self.model = Llama(
-            model_path=model_path,
-            n_ctx=LLM_CONTEXT_SIZE,
-            n_gpu_layers=LLM_GPU_LAYERS,
-            n_batch=512,  # Размер батча для обработки токенов
-            n_threads=8,  # Количество CPU потоков
-            use_mlock=True,  # Блокировка памяти для скорости
-            verbose=False
-        )
-        logging.getLogger(__name__).info(f"LLM загружена успешно (GPU layers: {LLM_GPU_LAYERS})")
+            logging.getLogger(__name__).info(f"LLM загружена успешно (GPU layers: {LLM_GPU_LAYERS})")
 
     def _create_rerank_prompt(self, query: str, passage: str) -> str:
         """Создание промпта для оценки релевантности"""
@@ -556,19 +591,30 @@ class LLMReranker:
 
             # Получаем оценку от LLM
             try:
-                response = self.model(
-                    prompt,
-                    max_tokens=10,  # Нужно только число
-                    temperature=LLM_TEMPERATURE,
-                    stop=["<|im_end|>", "\n"],
-                    echo=False,
-                    top_p=0.9,  # Nucleus sampling для скорости
-                    top_k=40,   # Ограничение словаря для скорости
-                    repeat_penalty=1.0  # Без penalty для скорости
-                )
-
+                if self.use_api:
+                    # API режим
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=LLM_TEMPERATURE,
+                        max_tokens=10,  # Нужно только число
+                    )
+                    score_text = response.choices[0].message.content.strip()
+                else:
+                    # Локальный режим
+                    response = self.model(
+                        prompt,
+                        max_tokens=10,  # Нужно только число
+                        temperature=LLM_TEMPERATURE,
+                        stop=["<|im_end|>", "\n"],
+                        echo=False,
+                        top_p=0.9,  # Nucleus sampling для скорости
+                        top_k=40,   # Ограничение словаря для скорости
+                        repeat_penalty=1.0  # Без penalty для скорости
+                    )
+                    score_text = response['choices'][0]['text'].strip()
+                
                 # Извлекаем оценку
-                score_text = response['choices'][0]['text'].strip()
                 score = self._extract_score(score_text)
                 rerank_scores.append(score)
 
@@ -795,8 +841,10 @@ class RAGPipeline:
             logging.getLogger(__name__).info("Используется Transformer Reranker (Qwen3-Reranker)")
             self.reranker = TransformerReranker()
         elif RERANKER_TYPE == "llm":
-            logging.getLogger(__name__).info("Используется LLM Reranker (медленный, очень качественный)")
-            self.reranker = LLMReranker()
+            use_api = (LLM_MODE == "api")
+            mode_str = "API" if use_api else "локальный"
+            logging.getLogger(__name__).info(f"Используется LLM Reranker ({mode_str} режим, очень качественный)")
+            self.reranker = LLMReranker(use_api=use_api)
         elif RERANKER_TYPE == "none":
             logging.getLogger(__name__).warning("Reranking отключен (RERANKER_TYPE=none)")
             self.reranker = None

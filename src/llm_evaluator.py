@@ -42,6 +42,9 @@ from src.config import (
     LLM_CONTEXT_SIZE,
     LLM_TEMPERATURE,
     LLM_GPU_LAYERS,
+    LLM_MODE,
+    LLM_API_MODEL,
+    OPENROUTER_API_KEY,
     MODELS_DIR
 )
 from src.logger import get_logger
@@ -66,17 +69,25 @@ class HybridRAGEvaluator:
         llm_model_path: Optional[str] = None,
         use_llm: bool = True,
         semantic_weight: float = 0.3,
-        llm_weight: float = 0.7
+        llm_weight: float = 0.7,
+        use_api: bool = None
     ):
         """
         Args:
-            llm_model_path: путь к LLM модели для оценки
+            llm_model_path: путь к LLM модели для оценки (для локального режима)
             use_llm: использовать ли LLM Judge (если False - только косинусное)
             semantic_weight: вес косинусного расстояния в итоговой метрике
             llm_weight: вес LLM метрик в итоговой метрике
+            use_api: использовать ли API (если None - определяется из LLM_MODE)
         """
         self.logger = get_logger(__name__)
-        self.use_llm = use_llm and LLAMA_CPP_AVAILABLE
+        
+        # Определяем режим работы
+        if use_api is None:
+            use_api = (LLM_MODE == "api")
+        
+        self.use_api = use_api
+        self.use_llm = use_llm and (LLAMA_CPP_AVAILABLE or use_api)
         self.semantic_weight = semantic_weight
         self.llm_weight = llm_weight
 
@@ -84,30 +95,56 @@ class HybridRAGEvaluator:
         self.llm = None
         if self.use_llm:
             try:
-                if llm_model_path is None:
-                    llm_model_path = MODELS_DIR / LLM_MODEL_FILE
-
-                llm_model_path = Path(llm_model_path)
-
-                if not llm_model_path.exists():
-                    self.logger.warning(f"LLM модель не найдена: {llm_model_path}")
-                    self.logger.warning("LLM Judge отключен, используется только косинусное расстояние")
-                    self.use_llm = False
+                if use_api:
+                    # API режим (OpenRouter)
+                    self.logger.info(f"Инициализация LLM Evaluator (API режим, модель: {LLM_API_MODEL})")
+                    try:
+                        from openai import OpenAI
+                        base_url = "https://openrouter.ai/api/v1"
+                        api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"
+                        
+                        default_headers = {}
+                        if OPENROUTER_API_KEY:
+                            default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+                        default_headers["HTTP-Referer"] = "https://github.com/your-repo"
+                        default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+                        
+                        self.client = OpenAI(
+                            base_url=base_url,
+                            api_key=api_key,
+                            timeout=60,
+                            default_headers=default_headers
+                        )
+                        self.model_name = LLM_API_MODEL
+                        self.logger.info(f"LLM Evaluator (API) инициализирован")
+                    except ImportError:
+                        raise ImportError("Установите openai: pip install openai")
                 else:
-                    self.logger.info(f"Загрузка LLM модели для оценки: {llm_model_path}")
-                    self.llm = Llama(
-                        model_path=str(llm_model_path),
-                        n_ctx=LLM_CONTEXT_SIZE,
-                        n_gpu_layers=LLM_GPU_LAYERS,
-                        verbose=False
-                    )
-                    self.logger.info(f"LLM Evaluator загружен (GPU layers: {LLM_GPU_LAYERS})")
+                    # Локальный режим
+                    if llm_model_path is None:
+                        llm_model_path = MODELS_DIR / LLM_MODEL_FILE
+
+                    llm_model_path = Path(llm_model_path)
+
+                    if not llm_model_path.exists():
+                        self.logger.warning(f"LLM модель не найдена: {llm_model_path}")
+                        self.logger.warning("LLM Judge отключен, используется только косинусное расстояние")
+                        self.use_llm = False
+                    else:
+                        self.logger.info(f"Загрузка LLM модели для оценки: {llm_model_path}")
+                        self.llm = Llama(
+                            model_path=str(llm_model_path),
+                            n_ctx=LLM_CONTEXT_SIZE,
+                            n_gpu_layers=LLM_GPU_LAYERS,
+                            verbose=False
+                        )
+                        self.logger.info(f"LLM Evaluator загружен (GPU layers: {LLM_GPU_LAYERS})")
             except Exception as e:
                 self.logger.warning(f"Ошибка загрузки LLM Judge: {e}")
                 self.logger.warning("LLM Judge отключен")
                 self.use_llm = False
 
-        self.logger.info(f"Hybrid Evaluator: semantic_weight={semantic_weight}, llm_weight={llm_weight}")
+        self.logger.info(f"Hybrid Evaluator: semantic_weight={semantic_weight}, llm_weight={llm_weight}, api={use_api}")
 
     def evaluate_retrieval(
         self,
@@ -192,13 +229,23 @@ class HybridRAGEvaluator:
         prompt = self._build_llm_prompt(query, chunks)
 
         try:
-            response = self.llm.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=1024
-            )
-
-            content = response['choices'][0]['message']['content']
+            if self.use_api:
+                # API режим
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=1024
+                )
+                content = response.choices[0].message.content
+            else:
+                # Локальный режим
+                response = self.llm.create_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=1024
+                )
+                content = response['choices'][0]['message']['content']
 
             # Парсим JSON
             metrics = self._parse_llm_response(content, len(chunks))
