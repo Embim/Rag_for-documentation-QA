@@ -433,7 +433,8 @@ def get_hybrid_evaluator(
     llm_model_path: Optional[str] = None,
     use_llm: bool = True,
     semantic_weight: float = 0.3,
-    llm_weight: float = 0.7
+    llm_weight: float = 0.7,
+    use_api: bool = None
 ) -> HybridRAGEvaluator:
     """
     Получить singleton экземпляр HybridRAGEvaluator
@@ -443,6 +444,7 @@ def get_hybrid_evaluator(
         use_llm: использовать ли LLM Judge
         semantic_weight: вес косинусного расстояния (0-1)
         llm_weight: вес LLM метрик (0-1)
+        use_api: использовать ли API (если None - определяется из LLM_MODE)
 
     Returns:
         HybridRAGEvaluator instance
@@ -454,7 +456,8 @@ def get_hybrid_evaluator(
             llm_model_path,
             use_llm,
             semantic_weight,
-            llm_weight
+            llm_weight,
+            use_api
         )
 
     return _evaluator_instance

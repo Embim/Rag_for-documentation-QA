@@ -52,12 +52,19 @@ class GridSearchOptimizer:
         if use_llm_eval:
             try:
                 from src.llm_evaluator import get_hybrid_evaluator
+                from src.config import LLM_MODE
+                
+                # Определяем режим работы (API или локальный)
+                use_api = (LLM_MODE == "api")
+                
                 self.evaluator = get_hybrid_evaluator(
                     use_llm=True,
                     semantic_weight=0.3,  # 30% косинусное расстояние
-                    llm_weight=0.7        # 70% LLM метрики
+                    llm_weight=0.7,       # 70% LLM метрики
+                    use_api=use_api
                 )
-                get_logger(__name__).info("✓ Hybrid Evaluator загружен (cosine 30% + LLM 70%)")
+                mode_str = "API" if use_api else "локальный"
+                get_logger(__name__).info(f"✓ Hybrid Evaluator загружен ({mode_str} режим, cosine 30% + LLM 70%)")
             except Exception as e:
                 get_logger(__name__).warning(f"Не удалось загрузить LLM Evaluator: {e}")
                 get_logger(__name__).warning("Используется только косинусное расстояние")

@@ -125,6 +125,53 @@ class QueryReformulator:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             print(f"[QueryReformulator] Кэш включен: {self.cache_dir}")
 
+    def _extract_final_answer(self, text: str) -> str:
+        """
+        Извлечение финального ответа из reasoning моделей
+        
+        Reasoning модели (sherlock-think-alpha, deepseek-r1 и т.д.) возвращают
+        reasoning процесс в тегах <think>, <think> и т.д.
+        Нужно извлечь только финальный ответ.
+        """
+        import re
+        
+        # Удаляем reasoning теги и их содержимое
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Удаляем строки, начинающиеся с "Хорошо", "Давайте" и т.д. (reasoning процесс)
+        lines = text.split('\n')
+        cleaned_lines = []
+        skip_reasoning = True
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Пропускаем reasoning строки
+            if skip_reasoning:
+                if any(line.lower().startswith(prefix) for prefix in [
+                    'хорошо', 'давайте', 'сначала', 'нужно', 'возможно',
+                    'well', 'let', 'first', 'need', 'maybe'
+                ]):
+                    continue
+                # Если нашли что-то похожее на финальный ответ, начинаем собирать
+                if len(line) > 20 and not line.startswith('<'):
+                    skip_reasoning = False
+            
+            if not skip_reasoning:
+                cleaned_lines.append(line)
+        
+        result = ' '.join(cleaned_lines).strip()
+        
+        # Если ничего не осталось, возвращаем оригинал (на случай если это не reasoning модель)
+        if not result:
+            result = text.strip()
+        
+        return result
+
     def _get_cache_key(self, query: str, method: str) -> str:
         """Генерация ключа кэша"""
         combined = f"{query}_{method}"
@@ -137,6 +184,9 @@ class QueryReformulator:
 
         cache_file = self.cache_dir / f"{cache_key}.pkl"
         if cache_file.exists():
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"[QueryReformulator] Использован кэш для ключа {cache_key[:16]}...")
             with open(cache_file, 'rb') as f:
                 return pickle.load(f)
         return None
@@ -196,8 +246,18 @@ class QueryReformulator:
                 if LLM_API_ROUTING:
                     request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
                 
+                # Логируем запрос
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[QueryReformulator API] → Запрос к {self.model_name}")
+                
                 response = self.client.chat.completions.create(**request_params)
-                reformulated = response.choices[0].message.content.strip()
+                raw_response = response.choices[0].message.content.strip()
+                
+                # Извлекаем финальный ответ из reasoning моделей
+                reformulated = self._extract_final_answer(raw_response)
+                
+                logger.info(f"[QueryReformulator API] ← Ответ получен: {reformulated[:80]}...")
             else:
                 # Локальный режим
                 response = self.llm(
@@ -267,8 +327,15 @@ class QueryReformulator:
                 if LLM_API_ROUTING:
                     request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
                 
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[QueryReformulator API] → Запрос (expanded) к {self.model_name}")
+                
                 response = self.client.chat.completions.create(**request_params)
-                reformulated = response.choices[0].message.content.strip()
+                raw_response = response.choices[0].message.content.strip()
+                reformulated = self._extract_final_answer(raw_response)
+                
+                logger.info(f"[QueryReformulator API] ← Ответ (expanded): {reformulated[:80]}...")
             else:
                 # Локальный режим
                 response = self.llm(
@@ -336,8 +403,15 @@ class QueryReformulator:
                 if LLM_API_ROUTING:
                     request_params["extra_headers"] = {"X-OpenRouter-Provider": LLM_API_ROUTING}
                 
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[QueryReformulator API] → Запрос (multi) к {self.model_name}")
+                
                 response = self.client.chat.completions.create(**request_params)
-                result_text = response.choices[0].message.content.strip()
+                raw_response = response.choices[0].message.content.strip()
+                result_text = self._extract_final_answer(raw_response)
+                
+                logger.info(f"[QueryReformulator API] ← Ответ (multi): {result_text[:80]}...")
             else:
                 # Локальный режим
                 response = self.llm(
