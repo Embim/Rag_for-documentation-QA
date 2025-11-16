@@ -10,6 +10,7 @@ from typing import List, Tuple, Dict
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from tqdm import tqdm
+import logging
 
 from src.config import (
     EMBEDDING_MODEL,
@@ -27,7 +28,7 @@ try:
     WEAVIATE_AVAILABLE = True
 except ImportError:
     WEAVIATE_AVAILABLE = False
-    print("Warning: weaviate-client not installed. WeaviateIndexer will not be available.")
+    logging.getLogger(__name__).warning("weaviate-client not installed. WeaviateIndexer will not be available.")
 
 
 class EmbeddingIndexer:
@@ -40,11 +41,11 @@ class EmbeddingIndexer:
             model_name: название модели из SentenceTransformers или HuggingFace
             device: устройство для вычислений (cpu/cuda)
         """
-        print(f"Загрузка embedding модели: {model_name}")
+        logging.getLogger(__name__).info(f"Загрузка embedding модели: {model_name}")
 
         # Специальная обработка для Qwen моделей
         if "Qwen" in model_name:
-            print(f"  Используется Qwen модель, загружаем с trust_remote_code=True")
+            logging.getLogger(__name__).info("Используется Qwen модель, загружаем с trust_remote_code=True")
             self.model = SentenceTransformer(model_name, device=device, trust_remote_code=True)
         else:
             self.model = SentenceTransformer(model_name, device=device)
@@ -67,7 +68,7 @@ class EmbeddingIndexer:
         Returns:
             массив эмбеддингов
         """
-        print(f"Генерация эмбеддингов для {len(texts)} текстов...")
+        logging.getLogger(__name__).info(f"Генерация эмбеддингов для {len(texts)} текстов...")
 
         embeddings = self.model.encode(
             texts,
@@ -77,7 +78,7 @@ class EmbeddingIndexer:
             normalize_embeddings=True  # для косинусного расстояния
         )
 
-        print(f"Создано эмбеддингов: {embeddings.shape}")
+        logging.getLogger(__name__).info(f"Создано эмбеддингов: {embeddings.shape}")
         return embeddings
 
     def build_faiss_index(self, embeddings: np.ndarray,
@@ -92,7 +93,7 @@ class EmbeddingIndexer:
         Returns:
             FAISS индекс
         """
-        print(f"Построение FAISS индекса размерности {self.dimension}...")
+        logging.getLogger(__name__).info(f"Построение FAISS индекса размерности {self.dimension}...")
 
         # Используем IndexFlatIP для косинусного расстояния (Inner Product)
         # т.к. векторы нормализованы
@@ -102,12 +103,12 @@ class EmbeddingIndexer:
             try:
                 res = faiss.StandardGpuResources()
                 index = faiss.index_cpu_to_gpu(res, 0, index)
-                print("FAISS индекс создан на GPU")
+                logging.getLogger(__name__).info("FAISS индекс создан на GPU")
             except:
-                print("GPU недоступен, используем CPU")
+                logging.getLogger(__name__).warning("GPU недоступен, используем CPU")
 
         index.add(embeddings.astype('float32'))
-        print(f"Добавлено {index.ntotal} векторов в индекс")
+        logging.getLogger(__name__).info(f"Добавлено {index.ntotal} векторов в индекс")
 
         self.index = index
         return index
@@ -155,13 +156,13 @@ class EmbeddingIndexer:
             with open(filepath, 'wb') as f:
                 f.write(index_bytes)
 
-            print(f"Индекс сохранен: {filepath}")
+            logging.getLogger(__name__).info(f"Индекс сохранен: {filepath}")
         except Exception as e:
             # Fallback на прямое сохранение (для путей без кириллицы)
-            print(f"[WARNING] Ошибка сериализации: {e}")
-            print("[INFO] Попытка прямого сохранения...")
+            logging.getLogger(__name__).warning(f"Ошибка сериализации: {e}")
+            logging.getLogger(__name__).info("Попытка прямого сохранения...")
             faiss.write_index(self.index, filepath)
-            print(f"Индекс сохранен: {filepath}")
+            logging.getLogger(__name__).info(f"Индекс сохранен: {filepath}")
 
     def load_index(self, filepath: str):
         """Загрузка индекса с диска"""
@@ -177,7 +178,7 @@ class EmbeddingIndexer:
             import numpy as np
             index_array = np.frombuffer(index_bytes, dtype=np.uint8)
             self.index = faiss.deserialize_index(index_array)
-            print(f"Индекс загружен: {filepath}")
+            logging.getLogger(__name__).info(f"Индекс загружен: {filepath}")
         except Exception as e:
             # Fallback: файл в старом формате, используем прямую загрузку
             # Создаем временный файл без кириллицы
@@ -188,7 +189,7 @@ class EmbeddingIndexer:
 
             try:
                 self.index = faiss.read_index(tmp_path)
-                print(f"Индекс загружен: {filepath} (через временный файл)")
+                logging.getLogger(__name__).info(f"Индекс загружен: {filepath} (через временный файл)")
             finally:
                 # Удаляем временный файл
                 os.unlink(tmp_path)
@@ -212,7 +213,7 @@ class WeaviateIndexer:
         if not WEAVIATE_AVAILABLE:
             raise ImportError("weaviate-client не установлен. Установите: pip install weaviate-client")
 
-        print(f"Подключение к Weaviate: {url}")
+        logging.getLogger(__name__).info(f"Подключение к Weaviate: {url}")
 
         # Подключение к Weaviate
         try:
@@ -221,19 +222,19 @@ class WeaviateIndexer:
                 port=8080,
                 grpc_port=50051
             )
-            print("Успешно подключено к Weaviate")
+            logging.getLogger(__name__).info("Успешно подключено к Weaviate")
         except Exception as e:
-            print(f"Ошибка подключения к Weaviate: {e}")
-            print("Убедитесь, что Weaviate запущен: docker-compose up -d")
+            logging.getLogger(__name__).error(f"Ошибка подключения к Weaviate: {e}")
+            logging.getLogger(__name__).info("Убедитесь, что Weaviate запущен: docker-compose up -d")
             raise
 
         self.class_name = class_name
 
-        print(f"Загрузка embedding модели: {embedding_model}")
+        logging.getLogger(__name__).info(f"Загрузка embedding модели: {embedding_model}")
 
         # Специальная обработка для Qwen моделей
         if "Qwen" in embedding_model:
-            print(f"  Используется Qwen модель, загружаем с trust_remote_code=True")
+            logging.getLogger(__name__).info("Используется Qwen модель, загружаем с trust_remote_code=True")
             self.model = SentenceTransformer(embedding_model, device=device, trust_remote_code=True)
         else:
             self.model = SentenceTransformer(embedding_model, device=device)
@@ -247,12 +248,12 @@ class WeaviateIndexer:
         try:
             # Проверяем, существует ли уже класс
             if self.client.collections.exists(self.class_name):
-                print(f"Класс {self.class_name} уже существует")
+                logging.getLogger(__name__).info(f"Класс {self.class_name} уже существует")
                 self.collection = self.client.collections.get(self.class_name)
                 return
 
             # Создаем новый класс
-            print(f"Создание класса {self.class_name}...")
+            logging.getLogger(__name__).info(f"Создание класса {self.class_name}...")
 
             self.collection = self.client.collections.create(
                 name=self.class_name,
@@ -269,10 +270,10 @@ class WeaviateIndexer:
                     Property(name="chunk_index", data_type=DataType.INT),  # номер чанка в документе
                 ]
             )
-            print(f"Класс {self.class_name} создан успешно")
+            logging.getLogger(__name__).info(f"Класс {self.class_name} создан успешно")
 
         except Exception as e:
-            print(f"Ошибка при создании схемы: {e}")
+            logging.getLogger(__name__).error(f"Ошибка при создании схемы: {e}")
             raise
 
     def create_embeddings(self, texts: List[str],
@@ -289,7 +290,7 @@ class WeaviateIndexer:
         Returns:
             массив эмбеддингов
         """
-        print(f"Генерация эмбеддингов для {len(texts)} текстов...")
+        logging.getLogger(__name__).info(f"Генерация эмбеддингов для {len(texts)} текстов...")
 
         embeddings = self.model.encode(
             texts,
@@ -299,7 +300,7 @@ class WeaviateIndexer:
             normalize_embeddings=True
         )
 
-        print(f"Создано эмбеддингов: {embeddings.shape}")
+        logging.getLogger(__name__).info(f"Создано эмбеддингов: {embeddings.shape}")
         return embeddings
 
     def index_documents(self, chunks_df: pd.DataFrame,
@@ -322,8 +323,8 @@ class WeaviateIndexer:
         if embedding_chunk_size is None:
             embedding_chunk_size = EMBEDDING_CHUNK_SIZE
 
-        print(f"Индексация {len(chunks_df)} документов в Weaviate...")
-        print(f"Обработка по {embedding_chunk_size} документов за раз для экономии памяти GPU")
+        logging.getLogger(__name__).info(f"Индексация {len(chunks_df)} документов в Weaviate...")
+        logging.getLogger(__name__).info(f"Обработка по {embedding_chunk_size} документов за раз для экономии памяти GPU")
 
         total_docs = len(chunks_df)
         num_chunks = (total_docs + embedding_chunk_size - 1) // embedding_chunk_size
@@ -333,7 +334,7 @@ class WeaviateIndexer:
             start_idx = chunk_idx * embedding_chunk_size
             end_idx = min(start_idx + embedding_chunk_size, total_docs)
 
-            print(f"\n[Батч {chunk_idx + 1}/{num_chunks}] Обработка документов {start_idx}-{end_idx}...")
+            logging.getLogger(__name__).info(f"[Батч {chunk_idx + 1}/{num_chunks}] Обработка документов {start_idx}-{end_idx}...")
 
             # Получаем подмножество документов
             chunk_df = chunks_df.iloc[start_idx:end_idx]
@@ -382,9 +383,9 @@ class WeaviateIndexer:
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                print(f"  GPU память очищена")
+                logging.getLogger(__name__).info("GPU память очищена")
 
-        print(f"\nИндексация завершена. Всего документов: {total_docs}")
+        logging.getLogger(__name__).info(f"Индексация завершена. Всего документов: {total_docs}")
 
     def search(self, query: str, k: int = 10, alpha: float = 0.5) -> Tuple[List[float], List[Dict]]:
         """
@@ -478,16 +479,16 @@ class WeaviateIndexer:
         """Удаление всех документов из коллекции"""
         try:
             self.client.collections.delete(self.class_name)
-            print(f"Коллекция {self.class_name} удалена")
+            logging.getLogger(__name__).info(f"Коллекция {self.class_name} удалена")
             self._create_schema()
         except Exception as e:
-            print(f"Ошибка при удалении: {e}")
+            logging.getLogger(__name__).error(f"Ошибка при удалении: {e}")
 
     def close(self):
         """Закрытие соединения с Weaviate"""
         if hasattr(self, 'client'):
             self.client.close()
-            print("Соединение с Weaviate закрыто")
+            logging.getLogger(__name__).info("Соединение с Weaviate закрыто")
 
     def __enter__(self):
         return self
@@ -514,12 +515,12 @@ class BM25Indexer:
         Args:
             texts: список текстов для индексации
         """
-        print(f"Построение BM25 индекса для {len(texts)} текстов...")
+        logging.getLogger(__name__).info(f"Построение BM25 индекса для {len(texts)} текстов...")
 
         self.tokenized_corpus = [self.tokenize(text) for text in tqdm(texts)]
         self.bm25 = BM25Okapi(self.tokenized_corpus)
 
-        print("BM25 индекс построен")
+        logging.getLogger(__name__).info("BM25 индекс построен")
 
     def search(self, query: str, k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -554,7 +555,7 @@ class BM25Indexer:
                 'bm25': self.bm25,
                 'tokenized_corpus': self.tokenized_corpus
             }, f)
-        print(f"BM25 индекс сохранен: {filepath}")
+        logging.getLogger(__name__).info(f"BM25 индекс сохранен: {filepath}")
 
     def load_index(self, filepath: str):
         """Загрузка BM25 индекса"""
@@ -563,7 +564,7 @@ class BM25Indexer:
             data = pickle.load(f)
             self.bm25 = data['bm25']
             self.tokenized_corpus = data['tokenized_corpus']
-        print(f"BM25 индекс загружен: {filepath}")
+        logging.getLogger(__name__).info(f"BM25 индекс загружен: {filepath}")
 
 
 def build_indexes(chunks_df: pd.DataFrame,
@@ -582,9 +583,9 @@ def build_indexes(chunks_df: pd.DataFrame,
         save_dir = MODELS_DIR
 
     # 1. Векторный индекс
-    print("\n" + "="*80)
-    print("ПОСТРОЕНИЕ ВЕКТОРНОГО ИНДЕКСА")
-    print("="*80)
+    logging.getLogger(__name__).info("="*80)
+    logging.getLogger(__name__).info("ПОСТРОЕНИЕ ВЕКТОРНОГО ИНДЕКСА")
+    logging.getLogger(__name__).info("="*80)
 
     embedding_indexer = EmbeddingIndexer()
 
@@ -610,9 +611,9 @@ def build_indexes(chunks_df: pd.DataFrame,
         chunks_df.to_pickle(os.path.join(save_dir, "chunks_metadata.pkl"))
 
     # 2. BM25 индекс
-    print("\n" + "="*80)
-    print("ПОСТРОЕНИЕ BM25 ИНДЕКСА")
-    print("="*80)
+    logging.getLogger(__name__).info("="*80)
+    logging.getLogger(__name__).info("ПОСТРОЕНИЕ BM25 ИНДЕКСА")
+    logging.getLogger(__name__).info("="*80)
 
     bm25_indexer = BM25Indexer()
     bm25_indexer.build_index(texts)
@@ -622,9 +623,9 @@ def build_indexes(chunks_df: pd.DataFrame,
         # save_dir уже строка после конвертации выше
         bm25_indexer.save_index(os.path.join(save_dir, "bm25.pkl"))
 
-    print("\n" + "="*80)
-    print("ИНДЕКСЫ ПОСТРОЕНЫ")
-    print("="*80)
+    logging.getLogger(__name__).info("="*80)
+    logging.getLogger(__name__).info("ИНДЕКСЫ ПОСТРОЕНЫ")
+    logging.getLogger(__name__).info("="*80)
 
     return embedding_indexer, bm25_indexer
 

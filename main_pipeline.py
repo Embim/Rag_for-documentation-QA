@@ -20,7 +20,9 @@ from src.config import (
     OUTPUTS_DIR,
     PROCESSED_DIR,
     USE_WEAVIATE,
-    ENABLE_AGENT_RAG
+    ENABLE_AGENT_RAG,
+    LOG_LEVEL,
+    LOG_FILE
 )
 from src.preprocessing import load_and_preprocess_documents, load_and_preprocess_questions
 from src.chunking import create_chunks_from_documents
@@ -28,6 +30,9 @@ from src.indexing import build_indexes, EmbeddingIndexer, BM25Indexer, WeaviateI
 from src.retrieval import RAGPipeline
 from src.llm_preprocessing import apply_llm_cleaning
 from src.grid_search_optimizer import optimize_rag_params
+from src.logger import setup_logging, get_logger, log_timing
+import logging
+import time
 
 # Проверка доступности Weaviate
 try:
@@ -36,7 +41,8 @@ try:
 except ImportError:
     WEAVIATE_AVAILABLE = False
     if USE_WEAVIATE:
-        print("[CRITICAL] USE_WEAVIATE=true, но weaviate-client не установлен!")
+        # Логгер будет инициализирован в main()
+        pass
 
 
 def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
@@ -52,9 +58,10 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
     Returns:
         (embedding_indexer, bm25_indexer, chunks_df)
     """
-    print("\n" + "="*80)
-    print("ЭТАП 1: ПОСТРОЕНИЕ БАЗЫ ЗНАНИЙ (OFFLINE)")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("ЭТАП 1: ПОСТРОЕНИЕ БАЗЫ ЗНАНИЙ (OFFLINE)")
+    logger.info("="*80)
 
     chunks_path = PROCESSED_DIR / "chunks.pkl"
     bm25_path = MODELS_DIR / "bm25.pkl"
@@ -63,15 +70,15 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
     use_weaviate = USE_WEAVIATE and WEAVIATE_AVAILABLE
 
     if use_weaviate:
-        print("\n[РЕЖИМ] Используется Weaviate для векторного поиска")
+        logger.info("[РЕЖИМ] Используется Weaviate для векторного поиска")
 
         # Проверяем существуют ли чанки
         if not force_rebuild and chunks_path.exists():
-            print("\nЧанки уже существуют. Загружаем...")
+            logger.info("Чанки уже существуют. Загружаем...")
 
             # Загрузка чанков
             chunks_df = pd.read_pickle(chunks_path)
-            print(f"Загружено {len(chunks_df)} чанков")
+            logger.info(f"Загружено {len(chunks_df)} чанков")
 
             # Подключаемся к Weaviate
             try:
@@ -79,34 +86,34 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
                 # Сохраняем метаданные
                 weaviate_indexer.chunk_metadata = chunks_df
 
-                print("✓ Подключено к Weaviate")
-                print("  Weaviate содержит векторный индекс + BM25")
-                print("  Для переиндексации используйте --force")
+                logger.info("✓ Подключено к Weaviate")
+                logger.info("Weaviate содержит векторный индекс + BM25")
+                logger.info("Для переиндексации используйте --force")
 
                 # Для Weaviate BM25 не нужен (встроен в Weaviate)
                 return weaviate_indexer, None, chunks_df
 
             except Exception as e:
-                print(f"\n[WARNING] Не удалось подключиться к Weaviate: {e}")
-                print("Убедитесь что Weaviate запущен: docker-compose up -d")
-                print("Или установите USE_WEAVIATE=false для использования FAISS")
+                logger.warning(f"Не удалось подключиться к Weaviate: {e}")
+                logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
+                logger.info("Или установите USE_WEAVIATE=false для использования FAISS")
                 raise
 
         # Строим индексы с нуля
-        print("\nПостроение новых индексов...")
+        logger.info("Построение новых индексов...")
 
     else:
-        print("\n[РЕЖИМ] Используется FAISS для векторного поиска")
+        logger.info("[РЕЖИМ] Используется FAISS для векторного поиска")
 
         faiss_path = MODELS_DIR / "faiss.index"
 
         # Проверяем существуют ли индексы (FAISS режим)
         if not force_rebuild and chunks_path.exists() and faiss_path.exists() and bm25_path.exists():
-            print("\nИндексы уже существуют. Загружаем...")
+            logger.info("Индексы уже существуют. Загружаем...")
 
             # Загрузка чанков
             chunks_df = pd.read_pickle(chunks_path)
-            print(f"Загружено {len(chunks_df)} чанков")
+            logger.info(f"Загружено {len(chunks_df)} чанков")
 
             # Загрузка индексов
             embedding_indexer = EmbeddingIndexer()
@@ -118,91 +125,99 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
 
             return embedding_indexer, bm25_indexer, chunks_df
 
-        print("\nПостроение новых индексов...")
+        logger.info("Построение новых индексов...")
 
     # === ОБЩАЯ ЧАСТЬ: Предобработка и чанкинг ===
 
     # 1. Загрузка и предобработка документов
-    print("\n1. Предобработка документов...")
-    documents_df = load_and_preprocess_documents(
-        str(WEBSITES_CSV),
-        apply_lemmatization=False  # Отключаем для скорости
-    )
+    logger.info("1. Предобработка документов...")
+    with log_timing(logger, "Предобработка документов"):
+        documents_df = load_and_preprocess_documents(
+            str(WEBSITES_CSV),
+            apply_lemmatization=False  # Отключаем для скорости
+        )
+        logger.info(f"Загружено документов: {len(documents_df)}")
 
     # 1.5. LLM очистка (опционально)
     if llm_clean:
-        print("\n1.5. LLM-очистка документов (это может занять несколько часов)...")
-        print(f"     Минимальный порог полезности: {min_usefulness}")
+        logger.info("1.5. LLM-очистка документов (это может занять несколько часов)...")
+        logger.info(f"Минимальный порог полезности: {min_usefulness}")
 
         try:
-            documents_df = apply_llm_cleaning(
-                documents_df,
-                min_usefulness=min_usefulness,
-                verbose=True
-            )
+            with log_timing(logger, "LLM-очистка документов"):
+                documents_df = apply_llm_cleaning(
+                    documents_df,
+                    min_usefulness=min_usefulness,
+                    verbose=True
+                )
 
             # Используем clean_text вместо text для дальнейшей обработки
             if 'clean_text' in documents_df.columns:
                 documents_df['text'] = documents_df['clean_text']
 
-            print(f"\n✅ LLM-очистка завершена! Документов после фильтрации: {len(documents_df)}")
+            logger.info(f"✅ LLM-очистка завершена! Документов после фильтрации: {len(documents_df)}")
 
         except Exception as e:
-            print(f"\n⚠️  ОШИБКА LLM-очистки: {e}")
-            print("     Продолжаем с исходными документами без LLM обработки")
+            logger.error(f"ОШИБКА LLM-очистки: {e}")
+            logger.info("Продолжаем с исходными документами без LLM обработки")
 
     # 2. Разбиение на чанки
-    print("\n2. Разбиение на чанки...")
-    chunks_df = create_chunks_from_documents(documents_df, method='words')
+    logger.info("2. Разбиение на чанки...")
+    with log_timing(logger, "Чанкинг документов"):
+        chunks_df = create_chunks_from_documents(documents_df, method='words')
+    logger.info(f"Всего чанков: {len(chunks_df)}")
 
     # Сохранение чанков
     chunks_df.to_pickle(chunks_path)
-    print(f"Чанки сохранены: {chunks_path}")
+    logger.info(f"Чанки сохранены: {chunks_path}")
 
     # 3. Построение векторного индекса
     if use_weaviate:
-        print("\n3. Построение Weaviate индекса (с встроенным BM25)...")
+        logger.info("3. Построение Weaviate индекса (с встроенным BM25)...")
 
         try:
-            weaviate_indexer = WeaviateIndexer()
+            with log_timing(logger, "Индексация в Weaviate"):
+                weaviate_indexer = WeaviateIndexer()
 
-            # Очищаем предыдущие данные если force_rebuild
-            if force_rebuild:
-                print("Очистка предыдущих данных в Weaviate...")
-                weaviate_indexer.delete_all()
+                # Очищаем предыдущие данные если force_rebuild
+                if force_rebuild:
+                    logger.info("Очистка предыдущих данных в Weaviate...")
+                    weaviate_indexer.delete_all()
 
-            # Индексируем документы (Weaviate автоматически создаст BM25 индекс)
-            weaviate_indexer.index_documents(chunks_df, show_progress=True)
+                # Индексируем документы (Weaviate автоматически создаст BM25 индекс)
+                weaviate_indexer.index_documents(chunks_df, show_progress=True)
 
             # Сохраняем метаданные
             weaviate_indexer.chunk_metadata = chunks_df
 
-            print("\n✓ Weaviate индекс построен успешно!")
-            print("  Включает: векторный индекс + BM25 (гибридный поиск)")
+            logger.info("✓ Weaviate индекс построен успешно!")
+            logger.info("Включает: векторный индекс + BM25 (гибридный поиск)")
 
             # Для Weaviate не нужен отдельный BM25
             return weaviate_indexer, None, chunks_df
 
         except Exception as e:
-            print(f"\n[ERROR] Ошибка при построении Weaviate индекса: {e}")
-            print("Убедитесь что Weaviate запущен: docker-compose up -d")
+            logger.error(f"Ошибка при построении Weaviate индекса: {e}")
+            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
             raise
 
     else:
-        print("\n3. Построение BM25 индекса...")
-        bm25_indexer = BM25Indexer()
-        texts = chunks_df['text'].tolist()
-        bm25_indexer.build_index(texts)
-        bm25_indexer.save_index(str(bm25_path))
+        logger.info("3. Построение BM25 индекса...")
+        with log_timing(logger, "BM25 индексация"):
+            bm25_indexer = BM25Indexer()
+            texts = chunks_df['text'].tolist()
+            bm25_indexer.build_index(texts)
+            bm25_indexer.save_index(str(bm25_path))
 
-        print("\n4. Построение FAISS индекса...")
-        embedding_indexer = EmbeddingIndexer()
-        embeddings = embedding_indexer.create_embeddings(texts)
-        embedding_indexer.build_faiss_index(embeddings)
-        embedding_indexer.chunk_metadata = chunks_df
-        embedding_indexer.save_index(str(MODELS_DIR / "faiss.index"))
+        logger.info("4. Построение FAISS индекса...")
+        with log_timing(logger, "FAISS индексация"):
+            embedding_indexer = EmbeddingIndexer()
+            embeddings = embedding_indexer.create_embeddings(texts)
+            embedding_indexer.build_faiss_index(embeddings)
+            embedding_indexer.chunk_metadata = chunks_df
+            embedding_indexer.save_index(str(MODELS_DIR / "faiss.index"))
 
-        print("\nБаза знаний построена успешно!")
+        logger.info("База знаний построена успешно!")
         return embedding_indexer, bm25_indexer, chunks_df
 
 
@@ -219,9 +234,10 @@ def process_questions(embedding_indexer, bm25_indexer,
     Returns:
         DataFrame с результатами
     """
-    print("\n" + "="*80)
-    print("ЭТАП 2: ОБРАБОТКА ВОПРОСОВ (ONLINE)")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("ЭТАП 2: ОБРАБОТКА ВОПРОСОВ (ONLINE)")
+    logger.info("="*80)
 
     # Загрузка вопросов если не переданы
     if questions_df is None:
@@ -236,7 +252,12 @@ def process_questions(embedding_indexer, bm25_indexer,
     # Обработка каждого вопроса
     results = []
 
-    print(f"\nОбработка {len(questions_df)} вопросов...")
+    logger.info(f"Обработка {len(questions_df)} вопросов...")
+
+    started_at = time.time()
+    last_partial_save = time.time()
+    save_every = 50  # каждые N вопросов сохраняем частичный файл
+    partial_path = OUTPUTS_DIR / "submission_partial.csv"
 
     for idx, row in tqdm(questions_df.iterrows(), total=len(questions_df)):
         q_id = row['q_id']
@@ -244,7 +265,9 @@ def process_questions(embedding_indexer, bm25_indexer,
 
         try:
             # Поиск релевантных документов
+            t0 = time.time()
             result = pipeline.search(query)
+            dt = time.time() - t0
 
             # Формируем результат
             doc_ids = result['documents_id']
@@ -258,8 +281,19 @@ def process_questions(embedding_indexer, bm25_indexer,
                 'web_list': str(doc_ids[:5])
             })
 
+            if (idx + 1) % save_every == 0:
+                # Сохраняем частичный результат
+                pd.DataFrame(results).to_csv(partial_path, index=False)
+                elapsed = time.time() - started_at
+                per_q = elapsed / (idx + 1)
+                eta = per_q * (len(questions_df) - (idx + 1))
+                logger.info(f"Прогресс: {idx + 1}/{len(questions_df)} | {per_q:.2f}s/вопрос | ETA ~ {eta/60:.1f} мин | частичный файл: {partial_path}")
+
+            # Логируем короткую метрику
+            logger.debug(f"q_id={q_id} | кандидатов={result.get('num_candidates', 'NA')} | время={dt:.2f}s | docs={doc_ids[:5]}")
+
         except Exception as e:
-            print(f"\nОшибка при обработке вопроса {q_id}: {e}")
+            logger.error(f"Ошибка при обработке вопроса {q_id}: {e}")
             # Возвращаем пустой результат
             results.append({
                 'q_id': q_id,
@@ -281,9 +315,10 @@ def evaluate_on_examples(embedding_indexer, bm25_indexer):
     Returns:
         средняя метрика
     """
-    print("\n" + "="*80)
-    print("ОЦЕНКА НА ЭТАЛОННЫХ ПРИМЕРАХ")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("ОЦЕНКА НА ЭТАЛОННЫХ ПРИМЕРАХ")
+    logger.info("="*80)
 
     from src.config import EXAMPLES_CSV
 
@@ -293,8 +328,8 @@ def evaluate_on_examples(embedding_indexer, bm25_indexer):
     # Извлекаем релевантные web_id из chunk'ов
     # (это требует дополнительной логики, упростим)
 
-    print(f"\nЗагружено {len(examples_df)} примеров для валидации")
-    print("Детальная оценка на примерах будет реализована отдельно")
+    logger.info(f"Загружено {len(examples_df)} примеров для валидации")
+    logger.info("Детальная оценка на примерах будет реализована отдельно")
 
     # TODO: Реализовать метрику recall@5
     # Для этого нужно извлечь web_id из chunk'ов в examples
@@ -304,14 +339,15 @@ def evaluate_on_examples(embedding_indexer, bm25_indexer):
 
 def cmd_build(args):
     """Команда: построить базу знаний"""
-    print("\n" + "="*80)
-    print("РЕЖИМ: ПОСТРОЕНИЕ БАЗЫ ЗНАНИЙ")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("РЕЖИМ: ПОСТРОЕНИЕ БАЗЫ ЗНАНИЙ")
+    logger.info("="*80)
 
     if args.llm_clean:
-        print("\n[LLM-РЕЖИМ] Включена очистка документов через LLM")
-        print(f"[LLM-РЕЖИМ] Минимальный порог полезности: {args.min_usefulness}")
-        print("[LLM-РЕЖИМ] Это увеличит время обработки в 10-20 раз!")
+        logger.info("[LLM-РЕЖИМ] Включена очистка документов через LLM")
+        logger.info(f"[LLM-РЕЖИМ] Минимальный порог полезности: {args.min_usefulness}")
+        logger.info("[LLM-РЕЖИМ] Это увеличит время обработки в 10-20 раз!")
 
     embedding_indexer, bm25_indexer, chunks_df = build_knowledge_base(
         force_rebuild=args.force,
@@ -319,33 +355,33 @@ def cmd_build(args):
         min_usefulness=args.min_usefulness
     )
 
-    print("\n" + "="*80)
-    print("[OK] БАЗА ЗНАНИЙ ПОСТРОЕНА УСПЕШНО")
-    print("="*80)
-    print(f"Всего чанков: {len(chunks_df)}")
+    logger.info("="*80)
+    logger.info("[OK] БАЗА ЗНАНИЙ ПОСТРОЕНА УСПЕШНО")
+    logger.info("="*80)
+    logger.info(f"Всего чанков: {len(chunks_df)}")
 
     if USE_WEAVIATE and WEAVIATE_AVAILABLE:
-        print(f"Векторный индекс: Weaviate (http://localhost:8080)")
-        print(f"BM25 индекс: встроен в Weaviate (гибридный поиск)")
+        logger.info("Векторный индекс: Weaviate (http://localhost:8080)")
+        logger.info("BM25 индекс: встроен в Weaviate (гибридный поиск)")
     else:
-        print(f"Векторный индекс: {MODELS_DIR / 'faiss.index'}")
-        print(f"BM25 индекс: {MODELS_DIR / 'bm25.pkl'}")
+        logger.info(f"Векторный индекс: {MODELS_DIR / 'faiss.index'}")
+        logger.info(f"BM25 индекс: {MODELS_DIR / 'bm25.pkl'}")
 
 
 def cmd_search(args):
     """Команда: обработать вопросы"""
-    print("\n" + "="*80)
-    print("РЕЖИМ: ОБРАБОТКА ВОПРОСОВ")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("РЕЖИМ: ОБРАБОТКА ВОПРОСОВ")
+    logger.info("="*80)
 
     # Загрузка существующих индексов
-    print("\nЗагрузка базы знаний...")
+    logger.info("Загрузка базы знаний...")
 
     chunks_path = PROCESSED_DIR / "chunks.pkl"
 
     if not chunks_path.exists():
-        print("\n[X] ОШИБКА: База знаний не найдена!")
-        print("Сначала выполните: python main_pipeline.py build")
+        logger.error("ОШИБКА: База знаний не найдена! Сначала выполните: python main_pipeline.py build")
         return
 
     # Определяем режим работы
@@ -353,28 +389,27 @@ def cmd_search(args):
 
     # Загрузка чанков
     chunks_df = pd.read_pickle(chunks_path)
-    print(f"Загружено {len(chunks_df)} чанков")
+    logger.info(f"Загружено {len(chunks_df)} чанков")
 
     # Загрузка векторного индекса
     if use_weaviate:
-        print("Используется Weaviate (векторный поиск + BM25)")
+        logger.info("Используется Weaviate (векторный поиск + BM25)")
         try:
             embedding_indexer = WeaviateIndexer()
             embedding_indexer.chunk_metadata = chunks_df
             bm25_indexer = None  # не нужен для Weaviate
-            print("✓ Подключено к Weaviate")
+            logger.info("✓ Подключено к Weaviate")
         except Exception as e:
-            print(f"\n[ERROR] Не удалось подключиться к Weaviate: {e}")
-            print("Убедитесь что Weaviate запущен: docker-compose up -d")
+            logger.error(f"Не удалось подключиться к Weaviate: {e}")
+            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
             return
     else:
-        print("Используется FAISS для векторного поиска")
+        logger.info("Используется FAISS для векторного поиска")
         faiss_path = MODELS_DIR / "faiss.index"
         bm25_path = MODELS_DIR / "bm25.pkl"
 
         if not faiss_path.exists() or not bm25_path.exists():
-            print("\n[X] ОШИБКА: FAISS или BM25 индекс не найден!")
-            print("Сначала выполните: python main_pipeline.py build")
+            logger.error("ОШИБКА: FAISS или BM25 индекс не найден! Сначала выполните: python main_pipeline.py build")
             return
 
         # Загрузка BM25
@@ -388,9 +423,9 @@ def cmd_search(args):
 
     # Оптимизация параметров (опционально)
     if args.optimize:
-        print("\n" + "="*80)
-        print("GRID SEARCH ОПТИМИЗАЦИЯ ПАРАМЕТРОВ")
-        print("="*80)
+        logger.info("="*80)
+        logger.info("GRID SEARCH ОПТИМИЗАЦИЯ ПАРАМЕТРОВ")
+        logger.info("="*80)
 
         # Загружаем вопросы для оптимизации
         optimize_questions_df = load_and_preprocess_questions(
@@ -404,64 +439,68 @@ def cmd_search(args):
 
         # Запускаем grid search
         try:
-            best_params = optimize_rag_params(
-                retriever=temp_retriever,
-                questions_df=optimize_questions_df,
-                mode=args.optimize_mode,
-                sample_size=args.optimize_sample
-            )
-            print("\n✅ Параметры оптимизированы! Продолжаем с лучшими параметрами...")
+            with log_timing(logger, "Grid Search"):
+                best_params = optimize_rag_params(
+                    retriever=temp_retriever,
+                    questions_df=optimize_questions_df,
+                    mode=args.optimize_mode,
+                    sample_size=args.optimize_sample
+                )
+            logger.info("✅ Параметры оптимизированы! Продолжаем с лучшими параметрами...")
 
         except Exception as e:
-            print(f"\n⚠️  ОШИБКА оптимизации: {e}")
-            print("     Продолжаем с текущими параметрами из config.py")
+            logger.warning(f"ОШИБКА оптимизации: {e}")
+            logger.info("Продолжаем с текущими параметрами из config.py")
 
     # Обработка вопросов
     if args.limit:
-        print(f"\nОбработка первых {args.limit} вопросов (режим тестирования)")
+        logger.info(f"Обработка первых {args.limit} вопросов (режим тестирования)")
         questions_df = load_and_preprocess_questions(
             str(QUESTIONS_CSV),
             apply_lemmatization=False
         ).head(args.limit)
     else:
-        print("\nОбработка всех вопросов")
+        logger.info("Обработка всех вопросов")
         questions_df = None
 
-    results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+    with log_timing(logger, "Обработка всех вопросов"):
+        results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
 
     # Сохранение результатов
     output_path = OUTPUTS_DIR / "submission.csv"
     results_df.to_csv(output_path, index=False)
 
-    print("\n" + "="*80)
-    print("[OK] ОБРАБОТКА ЗАВЕРШЕНА")
-    print("="*80)
-    print(f"Результаты: {output_path}")
-    print(f"Обработано вопросов: {len(results_df)}")
+    logger.info("="*80)
+    logger.info("[OK] ОБРАБОТКА ЗАВЕРШЕНА")
+    logger.info("="*80)
+    logger.info(f"Результаты: {output_path}")
+    logger.info(f"Обработано вопросов: {len(results_df)}")
 
 
 def cmd_all(args):
     """Команда: полный цикл (build + search)"""
-    print("\n" + "="*80)
-    print("РЕЖИМ: ПОЛНЫЙ ЦИКЛ (BUILD + SEARCH)")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("РЕЖИМ: ПОЛНЫЙ ЦИКЛ (BUILD + SEARCH)")
+    logger.info("="*80)
 
     if hasattr(args, 'llm_clean') and args.llm_clean:
-        print("\n[LLM-РЕЖИМ] Включена очистка документов через LLM")
+        logger.info("[LLM-РЕЖИМ] Включена очистка документов через LLM")
 
     # 1. Построение базы знаний
-    print("\n[1/2] Построение базы знаний...")
-    embedding_indexer, bm25_indexer, chunks_df = build_knowledge_base(
-        force_rebuild=args.force,
-        llm_clean=getattr(args, 'llm_clean', False),
-        min_usefulness=getattr(args, 'min_usefulness', 0.3)
-    )
+    logger.info("[1/2] Построение базы знаний...")
+    with log_timing(logger, "Полный цикл: build"):
+        embedding_indexer, bm25_indexer, chunks_df = build_knowledge_base(
+            force_rebuild=args.force,
+            llm_clean=getattr(args, 'llm_clean', False),
+            min_usefulness=getattr(args, 'min_usefulness', 0.3)
+        )
 
     # 2. Обработка вопросов
-    print("\n[2/2] Обработка вопросов...")
+    logger.info("[2/2] Обработка вопросов...")
 
     if args.limit:
-        print(f"Обработка первых {args.limit} вопросов (режим тестирования)")
+        logger.info(f"Обработка первых {args.limit} вопросов (режим тестирования)")
         questions_df = load_and_preprocess_questions(
             str(QUESTIONS_CSV),
             apply_lemmatization=False
@@ -469,24 +508,26 @@ def cmd_all(args):
     else:
         questions_df = None
 
-    results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+    with log_timing(logger, "Полный цикл: search"):
+        results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
 
     # 3. Сохранение результатов
     output_path = OUTPUTS_DIR / "submission.csv"
     results_df.to_csv(output_path, index=False)
 
-    print("\n" + "="*80)
-    print("[OK] ПОЛНЫЙ ЦИКЛ ЗАВЕРШЕН")
-    print("="*80)
-    print(f"Результаты: {output_path}")
-    print(f"Обработано вопросов: {len(results_df)}")
+    logger.info("="*80)
+    logger.info("[OK] ПОЛНЫЙ ЦИКЛ ЗАВЕРШЕН")
+    logger.info("="*80)
+    logger.info(f"Результаты: {output_path}")
+    logger.info(f"Обработано вопросов: {len(results_df)}")
 
 
 def cmd_evaluate(args):
     """Команда: оценка на примерах"""
-    print("\n" + "="*80)
-    print("РЕЖИМ: ОЦЕНКА НА ПРИМЕРАХ")
-    print("="*80)
+    logger = get_logger(__name__)
+    logger.info("="*80)
+    logger.info("РЕЖИМ: ОЦЕНКА НА ПРИМЕРАХ")
+    logger.info("="*80)
 
     # Загрузка индексов
     chunks_path = PROCESSED_DIR / "chunks.pkl"
@@ -494,8 +535,7 @@ def cmd_evaluate(args):
     bm25_path = MODELS_DIR / "bm25.pkl"
 
     if not chunks_path.exists() or not faiss_path.exists() or not bm25_path.exists():
-        print("\n[X] ОШИБКА: База знаний не найдена!")
-        print("Сначала выполните: python main_pipeline.py build")
+        logger.error("ОШИБКА: База знаний не найдена! Сначала выполните: python main_pipeline.py build")
         return
 
     chunks_df = pd.read_pickle(chunks_path)
@@ -512,6 +552,10 @@ def cmd_evaluate(args):
 
 def main():
     """Главная функция с парсингом аргументов"""
+    # Инициализация логирования (до парсинга, чтобы ловить ранние сообщения)
+    setup_logging(level=LOG_LEVEL, log_file=LOG_FILE)
+    logger = get_logger(__name__)
+
     parser = argparse.ArgumentParser(
         description="RAG пайплайн для поиска релевантных документов Альфа-Банка",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -637,19 +681,22 @@ EVALUATE:
         return
 
     # Вывод заголовка
-    print("="*80)
-    print("RAG ПАЙПЛАЙН ДЛЯ ПОИСКА РЕЛЕВАНТНЫХ ДОКУМЕНТОВ АЛЬФА-БАНКА")
-    print("="*80)
+    logger.info("="*80)
+    logger.info("RAG ПАЙПЛАЙН ДЛЯ ПОИСКА РЕЛЕВАНТНЫХ ДОКУМЕНТОВ АЛЬФА-БАНКА")
+    logger.info("="*80)
 
     if USE_WEAVIATE and WEAVIATE_AVAILABLE:
-        print("[INFO] Используется Weaviate для векторного поиска")
+        logger.info("Используется Weaviate для векторного поиска")
     else:
-        print("[INFO] Используется FAISS для векторного поиска")
+        logger.info("Используется FAISS для векторного поиска")
+
+    if USE_WEAVIATE and not WEAVIATE_AVAILABLE:
+        logger.critical("USE_WEAVIATE=true, но weaviate-client не установлен!")
 
     # Выполнение команды
     args.func(args)
 
-    print("\n[OK] Готово!")
+    logger.info("[OK] Готово!")
 
 
 if __name__ == "__main__":

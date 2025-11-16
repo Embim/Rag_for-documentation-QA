@@ -12,6 +12,10 @@ PROCESSED_DIR = DATA_DIR / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 
+# Логирование
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_FILE = OUTPUTS_DIR / os.environ.get("LOG_FILE", "pipeline.log")
+
 # Входные файлы
 WEBSITES_CSV = PROJECT_ROOT / "websites.csv"
 QUESTIONS_CSV = PROJECT_ROOT / "questions_clean.csv"

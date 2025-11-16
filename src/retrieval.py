@@ -6,6 +6,7 @@ import pandas as pd
 from typing import List, Tuple, Dict
 import re
 import os
+import logging
 
 # Фикс для CUDA путей перед импортом llama_cpp
 if os.name == 'nt':  # Windows
@@ -21,25 +22,25 @@ if os.name == 'nt':  # Windows
                 # Берем первую найденную версию
                 correct_path = os.path.join(cuda_base, versions[0])
                 os.environ['CUDA_PATH'] = correct_path
-                print(f"[INFO] CUDA_PATH исправлен: {cuda_path} -> {correct_path}")
+                logging.getLogger(__name__).info(f"CUDA_PATH исправлен: {cuda_path} -> {correct_path}")
             else:
                 # CUDA папка есть, но версий нет - удаляем CUDA_PATH
-                print(f"[WARNING] CUDA Toolkit не найден, удаляем CUDA_PATH: {cuda_path}")
+                logging.getLogger(__name__).warning(f"CUDA Toolkit не найден, удаляем CUDA_PATH: {cuda_path}")
                 del os.environ['CUDA_PATH']
         else:
             # CUDA вообще не установлена - удаляем переменную
-            print(f"[WARNING] CUDA Toolkit не установлен, удаляем CUDA_PATH: {cuda_path}")
+            logging.getLogger(__name__).warning(f"CUDA Toolkit не установлен, удаляем CUDA_PATH: {cuda_path}")
             del os.environ['CUDA_PATH']
     elif cuda_path:
-        print(f"[INFO] CUDA_PATH: {cuda_path}")
+        logging.getLogger(__name__).info(f"CUDA_PATH: {cuda_path}")
 
 try:
     from llama_cpp import Llama
     LLAMA_CPP_AVAILABLE = True
 except Exception as e:
     LLAMA_CPP_AVAILABLE = False
-    print(f"[WARNING] llama_cpp не загружен: {e}")
-    print("[WARNING] LLM реранкинг будет недоступен")
+    logging.getLogger(__name__).warning(f"llama_cpp не загружен: {e}")
+    logging.getLogger(__name__).warning("LLM реранкинг будет недоступен")
 
 from src.config import (
     TOP_K_DENSE,
@@ -106,9 +107,9 @@ class HybridRetriever:
                 # Используем только словарь синонимов (без LLM для скорости)
                 use_llm = QUERY_EXPANSION_METHOD in ["llm", "hybrid"]
                 self.query_expander = QueryExpander(use_llm=use_llm)
-                print(f"[INFO] Query Expansion включен (метод: {QUERY_EXPANSION_METHOD})")
+                logging.getLogger(__name__).info(f"Query Expansion включен (метод: {QUERY_EXPANSION_METHOD})")
             except Exception as e:
-                print(f"[WARNING] Query Expansion не загружен: {e}")
+                logging.getLogger(__name__).warning(f"Query Expansion не загружен: {e}")
                 self.use_query_expansion = False
 
         # Инициализация Metadata Filter (если нужно)
@@ -117,9 +118,9 @@ class HybridRetriever:
             try:
                 from src.metadata_filter import MetadataFilter
                 self.metadata_filter = MetadataFilter()
-                print(f"[INFO] Metadata Filtering включен (boost: {METADATA_BOOST_SCORE})")
+                logging.getLogger(__name__).info(f"Metadata Filtering включен (boost: {METADATA_BOOST_SCORE})")
             except Exception as e:
-                print(f"[WARNING] Metadata Filter не загружен: {e}")
+                logging.getLogger(__name__).warning(f"Metadata Filter не загружен: {e}")
 
         # Инициализация Query Classifier (для Dynamic TOP_K)
         self.query_classifier = None
@@ -127,9 +128,9 @@ class HybridRetriever:
             try:
                 from src.query_classifier import QueryClassifier
                 self.query_classifier = QueryClassifier()
-                print(f"[INFO] Dynamic TOP_K включен")
+                logging.getLogger(__name__).info("Dynamic TOP_K включен")
             except Exception as e:
-                print(f"[WARNING] Query Classifier не загружен: {e}")
+                logging.getLogger(__name__).warning(f"Query Classifier не загружен: {e}")
 
         # Инициализация Query Reformulator (для улучшения запросов)
         self.query_reformulator = None
@@ -141,9 +142,9 @@ class HybridRetriever:
                     llm_path,
                     use_cache=QUERY_REFORMULATION_CACHE
                 )
-                print(f"[INFO] Query Reformulation включен (метод: {QUERY_REFORMULATION_METHOD})")
+                logging.getLogger(__name__).info(f"Query Reformulation включен (метод: {QUERY_REFORMULATION_METHOD})")
             except Exception as e:
-                print(f"[WARNING] Query Reformulator не загружен: {e}")
+                logging.getLogger(__name__).warning(f"Query Reformulator не загружен: {e}")
 
     def search(self, query: str,
               k_dense: int = TOP_K_DENSE,
@@ -164,7 +165,7 @@ class HybridRetriever:
             dynamic_params = self.query_classifier.get_dynamic_top_k(query)
             k_dense = dynamic_params['k_dense']
             k_bm25 = dynamic_params['k_bm25']
-            print(f"[INFO] Dynamic TOP_K: {dynamic_params['query_type']} ({dynamic_params['complexity']}) → k_dense={k_dense}, k_bm25={k_bm25}")
+            logging.getLogger(__name__).info(f"Dynamic TOP_K: {dynamic_params['query_type']} ({dynamic_params['complexity']}) → k_dense={k_dense}, k_bm25={k_bm25}")
 
         # 0.5. Query Reformulation (если включено)
         working_query = query  # рабочий запрос для дальнейшей обработки
@@ -177,15 +178,13 @@ class HybridRetriever:
                 )
 
                 if len(reformulated_variants) > 1:
-                    print(f"[INFO] Query Reformulation: {len(reformulated_variants)} вариантов")
-                    print(f"      Исходный: {query}")
-                    print(f"      Переформулированный: {reformulated_variants[1]}")
+                    logging.getLogger(__name__).info(f"Query Reformulation: {len(reformulated_variants)} вариантов | исходный='{query}' | выбран='{reformulated_variants[1]}'")
 
                     # Используем переформулированный как основной (первый после исходного)
                     working_query = reformulated_variants[1]
 
             except Exception as e:
-                print(f"[WARNING] Query Reformulation ошибка: {e}")
+                logging.getLogger(__name__).warning(f"Query Reformulation ошибка: {e}")
 
         # 1. Query Expansion (если включено)
         queries = [working_query]  # по умолчанию используем (возможно переформулированный) запрос
@@ -195,9 +194,9 @@ class HybridRetriever:
                 # Берем первые 3 варианта для экономии времени
                 queries = expanded[:3]
                 if len(queries) > 1:
-                    print(f"[INFO] Query expansion: {len(queries)} вариантов запроса")
+                    logging.getLogger(__name__).info(f"Query expansion: {len(queries)} вариантов запроса")
             except Exception as e:
-                print(f"[WARNING] Query expansion ошибка: {e}")
+                logging.getLogger(__name__).warning(f"Query expansion ошибка: {e}")
                 queries = [working_query]
 
         # Выполняем поиск для каждого варианта запроса и объединяем результаты
@@ -295,11 +294,11 @@ class HybridRetriever:
             after_count = len(results_df)
 
             if before_count > after_count:
-                print(f"[INFO] Negative Mining: {before_count} → {after_count} документов")
+                logging.getLogger(__name__).info(f"Negative Mining: {before_count} → {after_count} документов")
 
             # Если отфильтровали все - возвращаем хотя бы топ-5 исходных
             if len(results_df) == 0:
-                print(f"[WARNING] Все документы отфильтрованы negative mining, возвращаем топ-5")
+                logging.getLogger(__name__).warning("Все документы отфильтрованы negative mining, возвращаем топ-5")
                 results_df = results_df.nlargest(5, 'retrieval_score')
 
         # 1. Usefulness Score Filtering
@@ -309,11 +308,11 @@ class HybridRetriever:
             after_count = len(results_df)
 
             if before_count > after_count:
-                print(f"[INFO] Usefulness filter: {before_count} → {after_count} документов (порог: {MIN_USEFULNESS_SCORE})")
+                logging.getLogger(__name__).info(f"Usefulness filter: {before_count} → {after_count} документов (порог: {MIN_USEFULNESS_SCORE})")
 
             # Если отфильтровали все - возвращаем хотя бы топ-3 исходных
             if len(results_df) == 0:
-                print(f"[WARNING] Все документы отфильтрованы, возвращаем топ-3 исходных")
+                logging.getLogger(__name__).warning("Все документы отфильтрованы, возвращаем топ-3 исходных")
                 results_df = results_df.nlargest(3, 'retrieval_score')
 
         # 2. Metadata Filtering (boost)
@@ -504,7 +503,7 @@ class LLMReranker:
         if model_path is None:
             model_path = str(MODELS_DIR / LLM_MODEL_FILE)
 
-        print(f"Загрузка LLM reranker модели: {model_path}")
+        logging.getLogger(__name__).info(f"Загрузка LLM reranker модели: {model_path}")
 
         self.model = Llama(
             model_path=model_path,
@@ -515,7 +514,7 @@ class LLMReranker:
             use_mlock=True,  # Блокировка памяти для скорости
             verbose=False
         )
-        print(f"  LLM загружена успешно (GPU layers: {LLM_GPU_LAYERS})")
+        logging.getLogger(__name__).info(f"LLM загружена успешно (GPU layers: {LLM_GPU_LAYERS})")
 
     def _create_rerank_prompt(self, query: str, passage: str) -> str:
         """Создание промпта для оценки релевантности"""
@@ -561,7 +560,7 @@ class LLMReranker:
         if len(candidates_df) == 0:
             return candidates_df
 
-        print(f"LLM Reranking {len(candidates_df)} кандидатов...")
+        logging.getLogger(__name__).info(f"LLM Reranking {len(candidates_df)} кандидатов...")
 
         rerank_scores = []
 
@@ -590,7 +589,7 @@ class LLMReranker:
                 rerank_scores.append(score)
 
             except Exception as e:
-                print(f"  Ошибка при оценке документа {idx}: {e}")
+                logging.getLogger(__name__).warning(f"Ошибка при оценке документа {idx}: {e}")
                 rerank_scores.append(0.0)
 
         # Добавляем скоры и сортируем
@@ -602,7 +601,7 @@ class LLMReranker:
             'rerank_score', ascending=False
         ).head(top_k).reset_index(drop=True)
 
-        print(f"  Топ-3 оценки: {reranked_df['rerank_score'].head(3).tolist()}")
+        logging.getLogger(__name__).info(f"Топ-3 оценки: {reranked_df['rerank_score'].head(3).tolist()}")
 
         return reranked_df
 
@@ -620,7 +619,7 @@ class TransformerReranker:
         if model_path is None:
             model_path = str(RERANKER_MODEL_PATH)
 
-        print(f"Загрузка Transformer Reranker: {model_path}")
+        logging.getLogger(__name__).info(f"Загрузка Transformer Reranker: {model_path}")
 
         try:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -641,7 +640,7 @@ class TransformerReranker:
             self.model.to(self.device)
             self.model.eval()
 
-            print(f"  Reranker загружен успешно (device: {self.device})")
+            logging.getLogger(__name__).info(f"Reranker загружен успешно (device: {self.device})")
 
         except Exception as e:
             raise ImportError(
@@ -667,7 +666,7 @@ class TransformerReranker:
         if len(candidates_df) == 0:
             return candidates_df
 
-        print(f"Transformer Reranking {len(candidates_df)} кандидатов...")
+        logging.getLogger(__name__).info(f"Transformer Reranking {len(candidates_df)} кандидатов...")
 
         # Подготовка пар (query, passage)
         pairs = []
@@ -711,7 +710,7 @@ class TransformerReranker:
             'rerank_score', ascending=False
         ).head(top_k).reset_index(drop=True)
 
-        print(f"  Топ-3 оценки: {reranked_df['rerank_score'].head(3).tolist()}")
+        logging.getLogger(__name__).info(f"Топ-3 оценки: {reranked_df['rerank_score'].head(3).tolist()}")
 
         return reranked_df
 
@@ -805,22 +804,21 @@ class RAGPipeline:
 
         # Выбираем reranker в зависимости от конфигурации
         if RERANKER_TYPE == "cross_encoder":
-            print(f"[INFO] Используется Cross-Encoder Reranker (быстрый и качественный)")
-            print(f"       Модель: {CROSS_ENCODER_MODEL}")
+            logging.getLogger(__name__).info(f"Используется Cross-Encoder Reranker (модель: {CROSS_ENCODER_MODEL})")
             from src.cross_encoder_reranker import CrossEncoderReranker
             self.reranker = CrossEncoderReranker(model_name=CROSS_ENCODER_MODEL)
         elif RERANKER_TYPE == "transformer" or USE_TRANSFORMER_RERANKER:
-            print("[INFO] Используется Transformer Reranker (Qwen3-Reranker)")
+            logging.getLogger(__name__).info("Используется Transformer Reranker (Qwen3-Reranker)")
             self.reranker = TransformerReranker()
         elif RERANKER_TYPE == "llm":
-            print("[INFO] Используется LLM Reranker (медленный, очень качественный)")
+            logging.getLogger(__name__).info("Используется LLM Reranker (медленный, очень качественный)")
             self.reranker = LLMReranker()
         elif RERANKER_TYPE == "none":
-            print("[WARNING] Reranking отключен (RERANKER_TYPE=none)")
+            logging.getLogger(__name__).warning("Reranking отключен (RERANKER_TYPE=none)")
             self.reranker = None
         else:
             # Fallback на LLM если тип неизвестен
-            print(f"[WARNING] Неизвестный RERANKER_TYPE: {RERANKER_TYPE}, используется LLM")
+            logging.getLogger(__name__).warning(f"Неизвестный RERANKER_TYPE: {RERANKER_TYPE}, используется LLM")
             self.reranker = LLMReranker()
 
         self.selector = DocumentSelector()
@@ -872,7 +870,7 @@ class RAGPipeline:
                 # Объединяем тексты соседних чанков
                 reranked = expander.merge_neighbors_text(reranked)
 
-            print(f"[INFO] Context Window: добавлено {len(reranked)} чанков (включая соседей)")
+            logging.getLogger(__name__).info(f"Context Window: добавлено {len(reranked)} чанков (включая соседей)")
 
         # 3. Выбор топ-N документов
         top_docs = self.selector.select_top_documents_with_diversity(
@@ -898,4 +896,4 @@ class RAGPipeline:
 
 
 if __name__ == "__main__":
-    print("Модуль retrieval.py готов к использованию")
+    logging.getLogger(__name__).info("Модуль retrieval.py готов к использованию")
