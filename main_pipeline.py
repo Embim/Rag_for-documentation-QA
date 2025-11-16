@@ -127,81 +127,69 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
 
         logger.info("Построение новых индексов...")
 
-    # === ОБЩАЯ ЧАСТЬ: Предобработка и чанкинг ===
+    # === ПОТОКОВАЯ ОБРАБОТКА: load → clean → chunk → accumulate/index ===
+    # Вместо batch processing (load all → clean all → chunk all)
+    # используем streaming (process doc → chunk doc → accumulate/index)
+    from src.streaming_builder import build_knowledge_base_streaming
 
-    # 1. Загрузка и предобработка документов
-    logger.info("1. Предобработка документов...")
-    with log_timing(logger, "Предобработка документов"):
-        documents_df = load_and_preprocess_documents(
-            str(WEBSITES_CSV),
-            apply_lemmatization=False  # Отключаем для скорости
-        )
-        logger.info(f"Загружено документов: {len(documents_df)}")
-
-    # 1.5. LLM очистка (опционально)
+    logger.info("Потоковая обработка документов (по одному документу за раз)...")
+    logger.info(f"  - LLM очистка: {'ВКЛ' if llm_clean else 'ВЫКЛ'}")
     if llm_clean:
-        logger.info("1.5. LLM-очистка документов (это может занять несколько часов)...")
-        logger.info(f"Минимальный порог полезности: {min_usefulness}")
+        logger.info(f"  - Порог полезности: {min_usefulness}")
+    logger.info(f"  - Режим: {'Weaviate (streaming index)' if use_weaviate else 'FAISS (accumulate then index)'}")
 
-        try:
-            with log_timing(logger, "LLM-очистка документов"):
-                documents_df = apply_llm_cleaning(
-                    documents_df,
-                    min_usefulness=min_usefulness,
-                    verbose=True
-                )
+    with log_timing(logger, "Потоковая обработка документов"):
+        if use_weaviate:
+            # Создаем Weaviate indexer
+            weaviate_indexer = WeaviateIndexer()
 
-            # Используем clean_text вместо text для дальнейшей обработки
-            if 'clean_text' in documents_df.columns:
-                documents_df['text'] = documents_df['clean_text']
+            # Очищаем если force_rebuild
+            if force_rebuild:
+                logger.info("Очистка предыдущих данных в Weaviate...")
+                weaviate_indexer.delete_all()
 
-            logger.info(f"✅ LLM-очистка завершена! Документов после фильтрации: {len(documents_df)}")
+            # Потоковая обработка с индексацией в Weaviate
+            chunks_df = build_knowledge_base_streaming(
+                csv_path=str(WEBSITES_CSV),
+                indexer=weaviate_indexer,
+                for_weaviate=True,
+                llm_clean=llm_clean,
+                min_usefulness=min_usefulness,
+                chunk_batch_size=500,  # индексируем по 500 чанков
+                csv_chunksize=5        # читаем по 5 документов за раз
+            )
+        else:
+            # Потоковая обработка для FAISS (накапливаем все чанки)
+            chunks_df = build_knowledge_base_streaming(
+                csv_path=str(WEBSITES_CSV),
+                indexer=None,
+                for_weaviate=False,
+                llm_clean=llm_clean,
+                min_usefulness=min_usefulness,
+                chunk_batch_size=1000,  # не важно для FAISS
+                csv_chunksize=5         # читаем по 5 документов за раз
+            )
 
-        except Exception as e:
-            logger.error(f"ОШИБКА LLM-очистки: {e}")
-            logger.info("Продолжаем с исходными документами без LLM обработки")
-
-    # 2. Разбиение на чанки
-    logger.info("2. Разбиение на чанки...")
-    with log_timing(logger, "Чанкинг документов"):
-        chunks_df = create_chunks_from_documents(documents_df, method='words')
     logger.info(f"Всего чанков: {len(chunks_df)}")
 
     # Сохранение чанков
     chunks_df.to_pickle(chunks_path)
     logger.info(f"Чанки сохранены: {chunks_path}")
 
-    # 3. Построение векторного индекса
+    # 3. Завершение индексации
     if use_weaviate:
-        logger.info("3. Построение Weaviate индекса (с встроенным BM25)...")
+        # Weaviate уже проиндексирован в streaming режиме выше
+        # Просто сохраняем метаданные и возвращаем
+        weaviate_indexer.chunk_metadata = chunks_df
 
-        try:
-            with log_timing(logger, "Индексация в Weaviate"):
-                weaviate_indexer = WeaviateIndexer()
+        logger.info("✓ Weaviate индекс построен успешно (streaming mode)!")
+        logger.info("Включает: векторный индекс + BM25 (гибридный поиск)")
 
-                # Очищаем предыдущие данные если force_rebuild
-                if force_rebuild:
-                    logger.info("Очистка предыдущих данных в Weaviate...")
-                    weaviate_indexer.delete_all()
-
-                # Индексируем документы (Weaviate автоматически создаст BM25 индекс)
-                weaviate_indexer.index_documents(chunks_df, show_progress=True)
-
-            # Сохраняем метаданные
-            weaviate_indexer.chunk_metadata = chunks_df
-
-            logger.info("✓ Weaviate индекс построен успешно!")
-            logger.info("Включает: векторный индекс + BM25 (гибридный поиск)")
-
-            # Для Weaviate не нужен отдельный BM25
-            return weaviate_indexer, None, chunks_df
-
-        except Exception as e:
-            logger.error(f"Ошибка при построении Weaviate индекса: {e}")
-            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
-            raise
+        # Для Weaviate не нужен отдельный BM25
+        return weaviate_indexer, None, chunks_df
 
     else:
+        # FAISS режим: строим индексы из накопленных чанков
         logger.info("3. Построение BM25 индекса...")
         with log_timing(logger, "BM25 индексация"):
             bm25_indexer = BM25Indexer()
@@ -437,14 +425,15 @@ def cmd_search(args):
         from src.retrieval import HybridRetriever
         temp_retriever = HybridRetriever(embedding_indexer, bm25_indexer)
 
-        # Запускаем grid search
+        # Запускаем grid search (используем дефолты из config если не указано)
         try:
             with log_timing(logger, "Grid Search"):
                 best_params = optimize_rag_params(
                     retriever=temp_retriever,
                     questions_df=optimize_questions_df,
-                    mode=args.optimize_mode,
-                    sample_size=args.optimize_sample
+                    mode=args.optimize_mode,        # None = из config.GRID_SEARCH_MODE
+                    sample_size=args.optimize_sample, # None = из config.GRID_SEARCH_SAMPLE_SIZE
+                    use_llm_eval=None               # None = из config.GRID_SEARCH_USE_LLM
                 )
             logger.info("✅ Параметры оптимизированы! Продолжаем с лучшими параметрами...")
 
@@ -626,15 +615,15 @@ EVALUATE:
     parser_search.add_argument(
         '--optimize-sample',
         type=int,
-        default=50,
-        help='Размер выборки для grid search (по умолчанию 50)'
+        default=None,
+        help='Размер выборки для grid search (по умолчанию из config.GRID_SEARCH_SAMPLE_SIZE)'
     )
     parser_search.add_argument(
         '--optimize-mode',
         type=str,
-        default='quick',
+        default=None,
         choices=['quick', 'full'],
-        help='Режим grid search: quick (быстрый) или full (полный)'
+        help='Режим grid search: quick или full (по умолчанию из config.GRID_SEARCH_MODE)'
     )
     parser_search.set_defaults(func=cmd_search)
 
