@@ -95,12 +95,21 @@ class GridSearchOptimizer:
         Определение сетки параметров
 
         Args:
-            mode: "quick" (быстрый) или "full" (полный)
+            mode: "test" (5 комбинаций), "quick" (54 комбинации) или "full" (1225 комбинаций)
 
         Returns:
             dict с параметрами
         """
-        if mode == "quick":
+        if mode == "test":
+            # Тестовый режим - ровно 5 комбинаций для быстрой проверки
+            # Используем разные значения для проверки работы системы
+            param_grid = {
+                "TOP_K_DENSE": [20, 25, 25, 30, 25],
+                "TOP_K_BM25": [20, 25, 30, 25, 25],
+                "TOP_K_RERANK": [15, 20, 20, 20, 15],
+                "HYBRID_ALPHA": [0.4, 0.5, 0.5, 0.6, 0.5]
+            }
+        elif mode == "quick":
             # Быстрый поиск
             param_grid = {
                 "TOP_K_DENSE": [15, 25, 35],
@@ -116,13 +125,12 @@ class GridSearchOptimizer:
                 "TOP_K_RERANK": [10, 15, 20, 25, 30],
                 "HYBRID_ALPHA": [0.3, 0.4, 0.5, 0.6, 0.7]
             }
-
-        total_combinations = (
-            len(param_grid["TOP_K_DENSE"]) *
-            len(param_grid["TOP_K_BM25"]) *
-            len(param_grid["TOP_K_RERANK"]) *
-            len(param_grid["HYBRID_ALPHA"])
-        )
+            total_combinations = (
+                len(param_grid["TOP_K_DENSE"]) *
+                len(param_grid["TOP_K_BM25"]) *
+                len(param_grid["TOP_K_RERANK"]) *
+                len(param_grid["HYBRID_ALPHA"])
+            )
 
         logger = get_logger(__name__)
         logger.info(f"📊 Grid Search режим: {mode}")
@@ -211,23 +219,49 @@ class GridSearchOptimizer:
             config.TOP_K_RERANK = original_params["TOP_K_RERANK"]
             config.HYBRID_ALPHA = original_params["HYBRID_ALPHA"]
 
-    def search(self, param_grid: dict) -> Tuple[Dict, pd.DataFrame]:
+    def search(self, param_grid: dict, mode: str = "quick") -> Tuple[Dict, pd.DataFrame]:
         """
         Запуск grid search
 
         Args:
             param_grid: сетка параметров
+            mode: режим поиска ("test", "quick", "full")
 
         Returns:
             (best_params, results_df)
         """
         # Генерируем все комбинации
         keys = list(param_grid.keys())
-        combinations = list(product(*[param_grid[k] for k in keys]))
+        
+        # Для test режима используем zip (ровно 5 комбинаций)
+        # Для других режимов используем product (все комбинации)
+        if mode == "test":
+            # Проверяем что все списки имеют одинаковую длину (5)
+            lengths = [len(param_grid[k]) for k in keys]
+            if len(set(lengths)) != 1 or lengths[0] != 5:
+                get_logger(__name__).warning(f"[TEST] Неправильная длина параметров: {lengths}, исправляем")
+                param_grid = {
+                    "TOP_K_DENSE": [20, 25, 25, 30, 25],
+                    "TOP_K_BM25": [20, 25, 30, 25, 25],
+                    "TOP_K_RERANK": [15, 20, 20, 20, 15],
+                    "HYBRID_ALPHA": [0.4, 0.5, 0.5, 0.6, 0.5]
+                }
+            # Используем zip для получения ровно 5 комбинаций
+            combinations = list(zip(*[param_grid[k] for k in keys]))
+        else:
+            # Используем product для всех комбинаций
+            combinations = list(product(*[param_grid[k] for k in keys]))
 
         logger = get_logger(__name__)
         logger.info("🔍 Запуск Grid Search...")
         logger.info(f"Комбинаций: {len(combinations)} | Вопросов в выборке: {len(self.questions_df)}")
+        
+        # Для test режима проверяем что ровно 5 комбинаций
+        if mode == "test":
+            if len(combinations) != 5:
+                logger.warning(f"[TEST] Ожидалось 5 комбинаций, получено {len(combinations)}, ограничиваем")
+                combinations = combinations[:5]
+            logger.info(f"[TEST] Используется ровно {len(combinations)} комбинаций для теста")
 
         # Результаты
         results = []
@@ -345,7 +379,7 @@ def optimize_rag_params(retriever, questions_df: pd.DataFrame,
     param_grid = optimizer.define_param_grid(mode=mode)
 
     # Запускаем grid search
-    best_params, results_df = optimizer.search(param_grid)
+    best_params, results_df = optimizer.search(param_grid, mode=mode)
 
     # Показываем результаты
     logger.info("📊 Топ-5 конфигураций:")

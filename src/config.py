@@ -190,9 +190,9 @@ COVERAGE_THRESHOLD = 0.7  # порог полноты контекста для 
 MAX_AGENT_ITERATIONS = 3  # максимальное количество итераций поиска
 
 # Параметры Grid Search оптимизации
-GRID_SEARCH_SAMPLE_SIZE = 5  # размер выборки для оптимизации гиперпараметров (рекомендуется 50)
+GRID_SEARCH_SAMPLE_SIZE = 50 # размер выборки для оптимизации гиперпараметров (рекомендуется 50)
 GRID_SEARCH_USE_LLM = os.environ.get("GRID_SEARCH_USE_LLM", "true").lower() == "true"  # использовать LLM для оценки (точнее, но медленнее ~1-2 часа)
-GRID_SEARCH_MODE = "quick"  # режим: "quick" (54 комбинации) или "full" (1225 комбинаций)
+GRID_SEARCH_MODE = os.environ.get("GRID_SEARCH_MODE", "test")  # режим: "test" (5 комбинаций), "quick" (54 комбинации) или "full" (1225 комбинаций)
 
 # Параметры Query Expansion (расширение запроса)
 ENABLE_QUERY_EXPANSION = os.environ.get("ENABLE_QUERY_EXPANSION", "true").lower() == "true"  # ✅ ВКЛЮЧЕНО
