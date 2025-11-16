@@ -19,9 +19,9 @@ MODELS = {
         "size": "~2 GB"
     },
     "llm": {
-        "repo": "bartowski/Qwen3-32B-2507-GGUF",
-        "files": ["Qwen3-32B-2507-Q8_0.gguf"],
-        "description": "Qwen3-32B 8-bit (ЕДИНАЯ для очистки И reranking)",
+        "repo": "unsloth/Qwen3-32B-GGUF",
+        "files": ["Qwen3-32B-Q8_0.gguf"],
+        "description": "Qwen3-32B 8-bit (unsloth, для очистки и reranking)",
         "size": "~32 GB"
     }
 }
