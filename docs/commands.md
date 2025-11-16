@@ -14,18 +14,15 @@ python main_pipeline.py build --force --llm-clean
 ### API режим (OpenRouter) — РЕКОМЕНДУЕТСЯ
 Использует OpenRouter API для ускорения (в 5-20 раз быстрее):
 ```bash
-# Минимальная настройка (без API ключа, бесплатная модель)
+# Настройка (API ключ ОБЯЗАТЕЛЕН даже для бесплатных моделей)
 export LLM_MODE=api
 export LLM_API_MODEL=tngtech/deepseek-r1t2-chimera:free
-python main_pipeline.py build --force --llm-clean
-
-# С API ключом (рекомендуется для лучшей производительности)
-export LLM_MODE=api
-export LLM_API_MODEL=tngtech/deepseek-r1t2-chimera:free
-export OPENROUTER_API_KEY=sk-or-v1-...  # получи на https://openrouter.ai/keys
+export OPENROUTER_API_KEY=sk-or-v1-...  # получи БЕСПЛАТНЫЙ ключ на https://openrouter.ai/keys
 export LLM_API_MAX_WORKERS=10  # параллельных запросов (по умолчанию 10)
 python main_pipeline.py build --force --llm-clean
 ```
+
+**Важно:** OpenRouter требует API ключ даже для бесплатных моделей. Получите бесплатный ключ на https://openrouter.ai/keys
 
 **Преимущества API режима:**
 - ⚡ Ускорение в 5-20 раз (параллельные запросы)
@@ -73,7 +70,7 @@ python main_pipeline.py build --force --llm-clean --min-usefulness 0.5  # бол
 Переменные окружения (см. `src/config.py`):
 - `LLM_MODE=local|api` — режим работы LLM (local = локальная модель, api = OpenRouter API).
 - `LLM_API_MODEL` — модель для API (по умолчанию: `tngtech/deepseek-r1t2-chimera:free`).
-- `OPENROUTER_API_KEY` — API ключ OpenRouter (опционально для бесплатных моделей).
+- `OPENROUTER_API_KEY` — API ключ OpenRouter (ОБЯЗАТЕЛЕН, получите бесплатный на https://openrouter.ai/keys).
 - `LLM_API_MAX_WORKERS` — количество параллельных запросов к API (по умолчанию: 10).
 - `USE_WEAVIATE=true` — включен по умолчанию.
 - `LOG_LEVEL=INFO|DEBUG` — уровень логирования.

@@ -157,8 +157,8 @@ LLM_API_MODEL = os.environ.get("LLM_API_MODEL", "tngtech/deepseek-r1t2-chimera:f
 # Другие модели OpenRouter: https://openrouter.ai/models
 # Примеры: "openai/gpt-4o-mini", "anthropic/claude-3-haiku", "meta-llama/llama-3.2-3b-instruct:free"
 
-# API ключ (опционально для бесплатных моделей, но рекомендуется)
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")  # получи на https://openrouter.ai/keys
+# API ключ (ОБЯЗАТЕЛЕН - OpenRouter требует ключ даже для бесплатных моделей)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")  # получи бесплатный ключ на https://openrouter.ai/keys
 
 # Параметры параллельных запросов к API
 LLM_API_MAX_WORKERS = int(os.environ.get("LLM_API_MAX_WORKERS", "10"))  # количество параллельных запросов к API

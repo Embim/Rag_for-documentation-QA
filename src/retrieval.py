@@ -493,17 +493,24 @@ class LLMReranker:
             try:
                 from openai import OpenAI
                 base_url = "https://openrouter.ai/api/v1"
-                api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"
                 
-                default_headers = {}
-                if OPENROUTER_API_KEY:
-                    default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
-                default_headers["HTTP-Referer"] = "https://github.com/your-repo"
-                default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+                # OpenRouter требует API ключ даже для бесплатных моделей
+                if not OPENROUTER_API_KEY:
+                    raise ValueError(
+                        "OPENROUTER_API_KEY не установлен!\n"
+                        "Получите бесплатный ключ на https://openrouter.ai/keys\n"
+                        "Установите: export OPENROUTER_API_KEY=sk-or-v1-..."
+                    )
+                
+                default_headers = {
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/your-repo",
+                    "X-Title": "AlfaBank RAG Pipeline"
+                }
                 
                 self.client = OpenAI(
                     base_url=base_url,
-                    api_key=api_key,
+                    api_key=OPENROUTER_API_KEY,
                     timeout=60,
                     default_headers=default_headers
                 )

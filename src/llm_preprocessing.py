@@ -93,24 +93,30 @@ class LLMDocumentCleanerAPI:
     def _init_api_client(self):
         """Инициализация OpenRouter API клиента"""
         # OpenRouter использует OpenAI-совместимый API
-        # API ключ опционален для бесплатных моделей, но рекомендуется
+        # OpenRouter требует API ключ даже для бесплатных моделей
         try:
             from openai import OpenAI
             # OpenRouter endpoint
             base_url = "https://openrouter.ai/api/v1"
-            api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY else "EMPTY"  # можно без ключа для бесплатных моделей
+            
+            # OpenRouter требует API ключ даже для бесплатных моделей
+            if not OPENROUTER_API_KEY:
+                raise ValueError(
+                    "OPENROUTER_API_KEY не установлен!\n"
+                    "Получите бесплатный ключ на https://openrouter.ai/keys\n"
+                    "Установите: export OPENROUTER_API_KEY=sk-or-v1-..."
+                )
             
             # Заголовки для OpenRouter
-            default_headers = {}
-            if OPENROUTER_API_KEY:
-                default_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
-            # Опционально: для отображения в лидербордах
-            default_headers["HTTP-Referer"] = "https://github.com/your-repo"  # можно изменить
-            default_headers["X-Title"] = "AlfaBank RAG Pipeline"
+            default_headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/your-repo",  # можно изменить
+                "X-Title": "AlfaBank RAG Pipeline"
+            }
             
             self.client = OpenAI(
                 base_url=base_url,
-                api_key=api_key,
+                api_key=OPENROUTER_API_KEY,
                 timeout=self.timeout,
                 default_headers=default_headers
             )
