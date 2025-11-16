@@ -228,13 +228,19 @@ class CoverageJudge:
         subquestions: List[str],
         context: str
     ) -> str:
-        """Формирует промпт для оценки полноты контекста"""
+        """Формирует промпт для оценки полноты контекста (строгий JSON-вывод)"""
 
         subquestions_text = "\n".join([
             f"{i+1}. {sq}" for i, sq in enumerate(subquestions)
         ])
 
-        prompt = f"""Ты - эксперт по оценке полноты информации для ответа на вопросы клиентов банка.
+        prompt = f"""Ты — строгий и беспристрастный эксперт по оценке полноты информации в контексте, используемом для ответа на вопросы клиентов банка. 
+Твоя задача — НЕ генерировать ответ пользователю, а только оценивать качество найденной информации.
+
+ТЕБЕ ДАНО:
+1) Основной вопрос клиента.
+2) Список под-вопросов (аспектов), которые должны быть покрыты контекстом.
+3) Набор найденных фрагментов документов (контекст).
 
 ВОПРОС КЛИЕНТА:
 {question}
@@ -246,25 +252,67 @@ class CoverageJudge:
 {context}
 
 ЗАДАЧА:
-Оцени для каждого подвопроса, достаточно ли информации в найденных фрагментах для полного ответа.
+Для КАЖДОГО подвопроса оцени, содержит ли контекст достаточно информации, чтобы корректно ответить.
 
-Для каждого подвопроса укажи:
-- "full" - есть полный, явный ответ
-- "partial" - есть частичная информация, но ответ неполный
-- "none" - информации нет или она не релевантна
+ОПРЕДЕЛЕНИЯ КАТЕГОРИЙ:
+- "full"  — контекст содержит полный, прямой, однозначный ответ. 
+             Фрагменты явно закрывают аспект без необходимости поиска дополнительных данных.
+- "partial" — есть релевантная информация, но она НЕ покрывает аспект полностью, 
+              содержит лишь часть ответа или требует дополнительных уточнений.
+- "none" — в контексте НЕТ информации по аспекту, 
+           или данные нерелевантны / явно недостаточны для осмысленного ответа.
 
-Выведи оценку в формате JSON:
+ADDATIVE SCORING (числовая шкала):
+Для каждого подвопроса дополнительно поставь числовой балл:
+- "full"    → score = 2
+- "partial" → score = 1
+- "none"    → score = 0
+
+ИТОГО:
+- Общий итоговый балл = сумма score по всем подвопросам.
+- Максимальный балл = 2 × (количество подвопросов).
+- Нормализованный балл = Общий балл / Максимальный балл (от 0 до 1, округли до 3 знаков).
+
+ТРЕБОВАНИЯ:
+- Не придумывай факты, НЕ пытайся дополнить или угадать отсутствующую информацию.
+- Оценивай строго только то, что есть в найденных фрагментах.
+- Будь объективен и следуй приведённым определениям.
+- Выведи ТОЛЬКО JSON без какого-либо текста до или после.
+
+ФОРМАТ ОТВЕТА (СТРОГО JSON):
+
 {{
-    "subquestion_coverage": {{
-        "1": "full|partial|none",
-        "2": "full|partial|none",
-        ...
-    }},
-    "missing_aspects": ["список отсутствующих аспектов, если есть"],
-    "recommendation": "нужно ли искать дополнительную информацию (да/нет)"
+  "subquestion_coverage": {{
+    "1": "full | partial | none",
+    "2": "full | partial | none",
+    ...
+  }},
+  "subquestion_scores": {{
+    "1": 0 | 1 | 2,
+    "2": 0 | 1 | 2,
+    ...
+  }},
+  "coverage_summary": {{
+    "full": <количество аспектов с меткой "full">,
+    "partial": <количество аспектов с меткой "partial">,
+    "none": <количество аспектов с меткой "none">
+  }},
+  "additive_score": {{
+    "total_score": <целое число, сумма по всем аспектам>,
+    "max_score": <целое число, максимум возможных баллов>,
+    "normalized_score": <число от 0 до 1 с точностью до 3 знаков>
+  }},
+  "missing_aspects": [
+    "краткие формулировки тех аспектов, где coverage = 'none'"
+  ],
+  "recommendation": "yes" | "no"
 }}
 
-Ответ (JSON):"""
+ПРАВИЛО ДЛЯ recommendation:
+- "yes" — если есть хотя бы один аспект с coverage = "none".
+- "no"  — если coverage для всех аспектов "full" или "partial".
+
+Ответ (ТОЛЬКО JSON):"""
 
         return prompt
 
@@ -274,7 +322,7 @@ class CoverageJudge:
         subquestions: List[str]
     ) -> Dict:
         """
-        Парсит ответ LLM и вычисляет coverage_score
+        Парсит ответ LLM и вычисляет coverage_score (поддержка нового JSON-формата)
         """
         try:
             # Извлекаем JSON из ответа
@@ -287,26 +335,74 @@ class CoverageJudge:
             json_str = response_text[start_idx:end_idx]
             data = json.loads(json_str)
 
-            # Вычисляем coverage_score
-            coverage_map = data.get('subquestion_coverage', {})
+            # Основные поля нового формата
+            coverage_map = data.get('subquestion_coverage', {}) or {}
+            subquestion_scores = data.get('subquestion_scores', {}) or {}
+            coverage_summary = data.get('coverage_summary', {}) or {}
+            additive_score = data.get('additive_score', {}) or {}
 
-            full_count = sum(1 for v in coverage_map.values() if v == 'full')
-            partial_count = sum(1 for v in coverage_map.values() if v == 'partial')
-            total = len(subquestions)
-
-            if total == 0:
-                coverage_score = 1.0
+            # Подсчеты при отсутствии coverage_summary
+            if not coverage_summary and coverage_map:
+                full_count = sum(1 for v in coverage_map.values() if str(v).strip().lower() == 'full')
+                partial_count = sum(1 for v in coverage_map.values() if str(v).strip().lower() == 'partial')
+                none_count = sum(1 for v in coverage_map.values() if str(v).strip().lower() == 'none')
+                coverage_summary = {
+                    'full': full_count,
+                    'partial': partial_count,
+                    'none': none_count
+                }
             else:
-                coverage_score = (full_count + 0.5 * partial_count) / total
+                # безопасные значения по умолчанию
+                full_count = int(coverage_summary.get('full', 0))
+                partial_count = int(coverage_summary.get('partial', 0))
+                none_count = int(coverage_summary.get('none', 0))
+
+            # Нормализованный скор (coverage_score)
+            total_subqs = len(subquestions) if subquestions else (full_count + partial_count + none_count)
+            normalized_score = None
+            if additive_score and 'normalized_score' in additive_score:
+                try:
+                    normalized_score = float(additive_score['normalized_score'])
+                except Exception:
+                    normalized_score = None
+
+            if normalized_score is None:
+                # Fallback на старую метрику: (full + 0.5 * partial) / total
+                if total_subqs == 0:
+                    coverage_score = 1.0
+                else:
+                    coverage_score = (full_count + 0.5 * partial_count) / max(1, total_subqs)
+            else:
+                coverage_score = normalized_score
+
+            # Missing aspects (если нет — соберем из coverage_map)
+            missing_aspects = data.get('missing_aspects', None)
+            if missing_aspects is None and coverage_map:
+                # Возьмем индексы с none
+                missing_aspects = []
+                for idx, v in coverage_map.items():
+                    if str(v).strip().lower() == 'none':
+                        # попробуем взять текст подвопроса
+                        try:
+                            i = int(idx) - 1
+                            if 0 <= i < len(subquestions):
+                                missing_aspects.append(subquestions[i])
+                            else:
+                                missing_aspects.append(str(idx))
+                        except Exception:
+                            missing_aspects.append(str(idx))
 
             return {
                 'coverage_score': coverage_score,
                 'subquestion_coverage': coverage_map,
-                'missing_aspects': data.get('missing_aspects', []),
-                'recommendation': data.get('recommendation', 'нет'),
+                'subquestion_scores': subquestion_scores,
+                'coverage_summary': coverage_summary,
+                'additive_score': additive_score,
+                'missing_aspects': missing_aspects if missing_aspects is not None else [],
+                'recommendation': data.get('recommendation', 'no'),
                 'full_count': full_count,
                 'partial_count': partial_count,
-                'none_count': total - full_count - partial_count
+                'none_count': none_count
             }
 
         except Exception as e:

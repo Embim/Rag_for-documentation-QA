@@ -26,7 +26,7 @@ from src.config import (
 )
 from src.preprocessing import load_and_preprocess_documents, load_and_preprocess_questions
 from src.chunking import create_chunks_from_documents
-from src.indexing import build_indexes, EmbeddingIndexer, BM25Indexer, WeaviateIndexer
+from src.indexing import WeaviateIndexer
 from src.retrieval import RAGPipeline
 from src.llm_preprocessing import apply_llm_cleaning
 from src.grid_search_optimizer import optimize_rag_params
@@ -64,68 +64,41 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
     logger.info("="*80)
 
     chunks_path = PROCESSED_DIR / "chunks.pkl"
-    bm25_path = MODELS_DIR / "bm25.pkl"
 
-    # Определяем режим работы
-    use_weaviate = USE_WEAVIATE and WEAVIATE_AVAILABLE
+    # В этом проекте используем только Weaviate
+    if not (USE_WEAVIATE and WEAVIATE_AVAILABLE):
+        raise RuntimeError("Weaviate обязателен. Установите weaviate-client и включите USE_WEAVIATE=True в config.py")
 
-    if use_weaviate:
-        logger.info("[РЕЖИМ] Используется Weaviate для векторного поиска")
+    logger.info("[РЕЖИМ] Используется только Weaviate для векторного поиска (гибридный с BM25)")
 
-        # Проверяем существуют ли чанки
-        if not force_rebuild and chunks_path.exists():
-            logger.info("Чанки уже существуют. Загружаем...")
+    # Проверяем существуют ли чанки
+    if not force_rebuild and chunks_path.exists():
+        logger.info("Чанки уже существуют. Загружаем...")
 
-            # Загрузка чанков
-            chunks_df = pd.read_pickle(chunks_path)
-            logger.info(f"Загружено {len(chunks_df)} чанков")
+        # Загрузка чанков
+        chunks_df = pd.read_pickle(chunks_path)
+        logger.info(f"Загружено {len(chunks_df)} чанков")
 
-            # Подключаемся к Weaviate
-            try:
-                weaviate_indexer = WeaviateIndexer()
-                # Сохраняем метаданные
-                weaviate_indexer.chunk_metadata = chunks_df
+        # Подключаемся к Weaviate
+        try:
+            weaviate_indexer = WeaviateIndexer()
+            # Сохраняем метаданные
+            weaviate_indexer.chunk_metadata = chunks_df
 
-                logger.info("✓ Подключено к Weaviate")
-                logger.info("Weaviate содержит векторный индекс + BM25")
-                logger.info("Для переиндексации используйте --force")
+            logger.info("✓ Подключено к Weaviate")
+            logger.info("Weaviate содержит векторный индекс + BM25")
+            logger.info("Для переиндексации используйте --force")
 
-                # Для Weaviate BM25 не нужен (встроен в Weaviate)
-                return weaviate_indexer, None, chunks_df
+            # Для Weaviate отдельный BM25 не нужен
+            return weaviate_indexer, None, chunks_df
 
-            except Exception as e:
-                logger.warning(f"Не удалось подключиться к Weaviate: {e}")
-                logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
-                logger.info("Или установите USE_WEAVIATE=false для использования FAISS")
-                raise
+        except Exception as e:
+            logger.warning(f"Не удалось подключиться к Weaviate: {e}")
+            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
+            raise
 
-        # Строим индексы с нуля
-        logger.info("Построение новых индексов...")
-
-    else:
-        logger.info("[РЕЖИМ] Используется FAISS для векторного поиска")
-
-        faiss_path = MODELS_DIR / "faiss.index"
-
-        # Проверяем существуют ли индексы (FAISS режим)
-        if not force_rebuild and chunks_path.exists() and faiss_path.exists() and bm25_path.exists():
-            logger.info("Индексы уже существуют. Загружаем...")
-
-            # Загрузка чанков
-            chunks_df = pd.read_pickle(chunks_path)
-            logger.info(f"Загружено {len(chunks_df)} чанков")
-
-            # Загрузка индексов
-            embedding_indexer = EmbeddingIndexer()
-            embedding_indexer.load_index(str(faiss_path))
-            embedding_indexer.chunk_metadata = chunks_df
-
-            bm25_indexer = BM25Indexer()
-            bm25_indexer.load_index(str(bm25_path))
-
-            return embedding_indexer, bm25_indexer, chunks_df
-
-        logger.info("Построение новых индексов...")
+    # Строим индексы с нуля
+    logger.info("Построение новых индексов...")
 
     # === ПОТОКОВАЯ ОБРАБОТКА: load → clean → chunk → accumulate/index ===
     # Вместо batch processing (load all → clean all → chunk all)
@@ -136,39 +109,27 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
     logger.info(f"  - LLM очистка: {'ВКЛ' if llm_clean else 'ВЫКЛ'}")
     if llm_clean:
         logger.info(f"  - Порог полезности: {min_usefulness}")
-    logger.info(f"  - Режим: {'Weaviate (streaming index)' if use_weaviate else 'FAISS (accumulate then index)'}")
+    logger.info(f"  - Режим: Weaviate (streaming index)")
 
     with log_timing(logger, "Потоковая обработка документов"):
-        if use_weaviate:
-            # Создаем Weaviate indexer
-            weaviate_indexer = WeaviateIndexer()
+        # Создаем Weaviate indexer
+        weaviate_indexer = WeaviateIndexer()
 
-            # Очищаем если force_rebuild
-            if force_rebuild:
-                logger.info("Очистка предыдущих данных в Weaviate...")
-                weaviate_indexer.delete_all()
+        # Очищаем если force_rebuild
+        if force_rebuild:
+            logger.info("Очистка предыдущих данных в Weaviate...")
+            weaviate_indexer.delete_all()
 
-            # Потоковая обработка с индексацией в Weaviate
-            chunks_df = build_knowledge_base_streaming(
-                csv_path=str(WEBSITES_CSV),
-                indexer=weaviate_indexer,
-                for_weaviate=True,
-                llm_clean=llm_clean,
-                min_usefulness=min_usefulness,
-                chunk_batch_size=500,  # индексируем по 500 чанков
-                csv_chunksize=5        # читаем по 5 документов за раз
-            )
-        else:
-            # Потоковая обработка для FAISS (накапливаем все чанки)
-            chunks_df = build_knowledge_base_streaming(
-                csv_path=str(WEBSITES_CSV),
-                indexer=None,
-                for_weaviate=False,
-                llm_clean=llm_clean,
-                min_usefulness=min_usefulness,
-                chunk_batch_size=1000,  # не важно для FAISS
-                csv_chunksize=5         # читаем по 5 документов за раз
-            )
+        # Потоковая обработка с индексацией в Weaviate
+        chunks_df = build_knowledge_base_streaming(
+            csv_path=str(WEBSITES_CSV),
+            indexer=weaviate_indexer,
+            for_weaviate=True,
+            llm_clean=llm_clean,
+            min_usefulness=min_usefulness,
+            chunk_batch_size=500,  # индексируем по 500 чанков
+            csv_chunksize=5        # читаем по 5 документов за раз
+        )
 
     logger.info(f"Всего чанков: {len(chunks_df)}")
 
@@ -176,37 +137,11 @@ def build_knowledge_base(force_rebuild: bool = False, llm_clean: bool = False,
     chunks_df.to_pickle(chunks_path)
     logger.info(f"Чанки сохранены: {chunks_path}")
 
-    # 3. Завершение индексации
-    if use_weaviate:
-        # Weaviate уже проиндексирован в streaming режиме выше
-        # Просто сохраняем метаданные и возвращаем
-        weaviate_indexer.chunk_metadata = chunks_df
-
-        logger.info("✓ Weaviate индекс построен успешно (streaming mode)!")
-        logger.info("Включает: векторный индекс + BM25 (гибридный поиск)")
-
-        # Для Weaviate не нужен отдельный BM25
-        return weaviate_indexer, None, chunks_df
-
-    else:
-        # FAISS режим: строим индексы из накопленных чанков
-        logger.info("3. Построение BM25 индекса...")
-        with log_timing(logger, "BM25 индексация"):
-            bm25_indexer = BM25Indexer()
-            texts = chunks_df['text'].tolist()
-            bm25_indexer.build_index(texts)
-            bm25_indexer.save_index(str(bm25_path))
-
-        logger.info("4. Построение FAISS индекса...")
-        with log_timing(logger, "FAISS индексация"):
-            embedding_indexer = EmbeddingIndexer()
-            embeddings = embedding_indexer.create_embeddings(texts)
-            embedding_indexer.build_faiss_index(embeddings)
-            embedding_indexer.chunk_metadata = chunks_df
-            embedding_indexer.save_index(str(MODELS_DIR / "faiss.index"))
-
-        logger.info("База знаний построена успешно!")
-        return embedding_indexer, bm25_indexer, chunks_df
+    # 3. Завершение индексации (Weaviate уже проиндексирован в streaming режиме выше)
+    weaviate_indexer.chunk_metadata = chunks_df
+    logger.info("✓ Weaviate индекс построен успешно (streaming mode)!")
+    logger.info("Включает: векторный индекс + BM25 (гибридный поиск)")
+    return weaviate_indexer, None, chunks_df
 
 
 def process_questions(embedding_indexer, bm25_indexer,
@@ -351,9 +286,10 @@ def cmd_build(args):
     if USE_WEAVIATE and WEAVIATE_AVAILABLE:
         logger.info("Векторный индекс: Weaviate (http://localhost:8080)")
         logger.info("BM25 индекс: встроен в Weaviate (гибридный поиск)")
-    else:
-        logger.info(f"Векторный индекс: {MODELS_DIR / 'faiss.index'}")
-        logger.info(f"BM25 индекс: {MODELS_DIR / 'bm25.pkl'}")
+        try:
+            embedding_indexer.close()
+        except Exception:
+            pass
 
 
 def cmd_search(args):
@@ -372,42 +308,21 @@ def cmd_search(args):
         logger.error("ОШИБКА: База знаний не найдена! Сначала выполните: python main_pipeline.py build")
         return
 
-    # Определяем режим работы
-    use_weaviate = USE_WEAVIATE and WEAVIATE_AVAILABLE
-
     # Загрузка чанков
     chunks_df = pd.read_pickle(chunks_path)
     logger.info(f"Загружено {len(chunks_df)} чанков")
 
-    # Загрузка векторного индекса
-    if use_weaviate:
-        logger.info("Используется Weaviate (векторный поиск + BM25)")
-        try:
-            embedding_indexer = WeaviateIndexer()
-            embedding_indexer.chunk_metadata = chunks_df
-            bm25_indexer = None  # не нужен для Weaviate
-            logger.info("✓ Подключено к Weaviate")
-        except Exception as e:
-            logger.error(f"Не удалось подключиться к Weaviate: {e}")
-            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
-            return
-    else:
-        logger.info("Используется FAISS для векторного поиска")
-        faiss_path = MODELS_DIR / "faiss.index"
-        bm25_path = MODELS_DIR / "bm25.pkl"
-
-        if not faiss_path.exists() or not bm25_path.exists():
-            logger.error("ОШИБКА: FAISS или BM25 индекс не найден! Сначала выполните: python main_pipeline.py build")
-            return
-
-        # Загрузка BM25
-        bm25_indexer = BM25Indexer()
-        bm25_indexer.load_index(str(bm25_path))
-
-        # Загрузка FAISS
-        embedding_indexer = EmbeddingIndexer()
-        embedding_indexer.load_index(str(faiss_path))
+    # Загрузка векторного индекса (Weaviate-only)
+    logger.info("Используется Weaviate (векторный поиск + BM25)")
+    try:
+        embedding_indexer = WeaviateIndexer()
         embedding_indexer.chunk_metadata = chunks_df
+        bm25_indexer = None  # не нужен для Weaviate
+        logger.info("✓ Подключено к Weaviate")
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к Weaviate: {e}")
+        logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
+        return
 
     # Оптимизация параметров (опционально)
     if args.optimize:
@@ -453,7 +368,15 @@ def cmd_search(args):
         questions_df = None
 
     with log_timing(logger, "Обработка всех вопросов"):
-        results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+        try:
+            results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+        finally:
+            try:
+                # Закрываем соединение с Weaviate после поиска
+                if hasattr(embedding_indexer, 'close'):
+                    embedding_indexer.close()
+            except Exception:
+                pass
 
     # Сохранение результатов
     output_path = OUTPUTS_DIR / "submission.csv"
@@ -498,7 +421,14 @@ def cmd_all(args):
         questions_df = None
 
     with log_timing(logger, "Полный цикл: search"):
-        results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+        try:
+            results_df = process_questions(embedding_indexer, bm25_indexer, questions_df)
+        finally:
+            try:
+                if hasattr(embedding_indexer, 'close'):
+                    embedding_indexer.close()
+            except Exception:
+                pass
 
     # 3. Сохранение результатов
     output_path = OUTPUTS_DIR / "submission.csv"
@@ -518,22 +448,21 @@ def cmd_evaluate(args):
     logger.info("РЕЖИМ: ОЦЕНКА НА ПРИМЕРАХ")
     logger.info("="*80)
 
-    # Загрузка индексов
+    # Загрузка индексов (Weaviate-only)
     chunks_path = PROCESSED_DIR / "chunks.pkl"
-    faiss_path = MODELS_DIR / "faiss.index"
-    bm25_path = MODELS_DIR / "bm25.pkl"
-
-    if not chunks_path.exists() or not faiss_path.exists() or not bm25_path.exists():
+    if not chunks_path.exists():
         logger.error("ОШИБКА: База знаний не найдена! Сначала выполните: python main_pipeline.py build")
         return
 
     chunks_df = pd.read_pickle(chunks_path)
-    embedding_indexer = EmbeddingIndexer()
-    embedding_indexer.load_index(str(faiss_path))
-    embedding_indexer.chunk_metadata = chunks_df
-
-    bm25_indexer = BM25Indexer()
-    bm25_indexer.load_index(str(bm25_path))
+    try:
+        embedding_indexer = WeaviateIndexer()
+        embedding_indexer.chunk_metadata = chunks_df
+        bm25_indexer = None
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к Weaviate: {e}")
+        logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
+        return
 
     # Оценка
     evaluate_on_examples(embedding_indexer, bm25_indexer)
@@ -677,7 +606,7 @@ EVALUATE:
     if USE_WEAVIATE and WEAVIATE_AVAILABLE:
         logger.info("Используется Weaviate для векторного поиска")
     else:
-        logger.info("Используется FAISS для векторного поиска")
+        logger.warning("Weaviate не доступен или отключен, но проект сконфигурирован как Weaviate-only.")
 
     if USE_WEAVIATE and not WEAVIATE_AVAILABLE:
         logger.critical("USE_WEAVIATE=true, но weaviate-client не установлен!")

@@ -61,7 +61,7 @@ outputs/
 
 # Docker volumes
 weaviate_data/
-/docs
+/docs_old
 /outputs
 
 # OS

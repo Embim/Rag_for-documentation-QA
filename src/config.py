@@ -48,7 +48,7 @@ if torch.cuda.is_available():
     EMBEDDING_DEVICE = "cuda"
     # Оптимизация для A100 80GB - максимальные batch size
     EMBEDDING_BATCH_SIZE = 128  # A100 80GB может обрабатывать большие батчи
-    EMBEDDING_CHUNK_SIZE = 2000  # Увеличено для A100 (больше VRAM = меньше итераций)
+    EMBEDDING_CHUNK_SIZE = 100  # Увеличено для A100 (больше VRAM = меньше итераций)
     print(f"[GPU] Используется: {torch.cuda.get_device_name(0)}")
     print(f"      CUDA версия: {torch.version.cuda}")
     print(f"      Batch size: {EMBEDDING_BATCH_SIZE}")
@@ -156,7 +156,7 @@ GRID_SEARCH_MODE = "quick"  # режим: "quick" (54 комбинации) ил
 
 # Параметры Query Expansion (расширение запроса)
 ENABLE_QUERY_EXPANSION = os.environ.get("ENABLE_QUERY_EXPANSION", "true").lower() == "true"  # ✅ ВКЛЮЧЕНО
-QUERY_EXPANSION_METHOD = "synonyms"  # "synonyms", "llm", "hybrid" (synonyms - быстро и эффективно)
+QUERY_EXPANSION_METHOD = "hybrid"  # "synonyms", "llm", "hybrid" (synonyms - быстро и эффективно)
 
 # Параметры Metadata Filtering (фильтрация по метаданным)
 ENABLE_METADATA_FILTER = os.environ.get("ENABLE_METADATA_FILTER", "true").lower() == "true"  # по умолчанию ВКЛ

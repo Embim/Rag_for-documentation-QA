@@ -172,7 +172,7 @@ def test_weaviate_comparison():
     print("ТЕСТ 4: Сравнение Weaviate vs FAISS")
     print("=" * 80)
 
-    from src.indexing import EmbeddingIndexer
+    from src.indexing import WeaviateIndexer
 
     test_chunks = pd.DataFrame([
         {
@@ -210,7 +210,7 @@ def test_weaviate_comparison():
 
         # FAISS
         print("\n2. FAISS:")
-        faiss_idx = EmbeddingIndexer()
+        faiss_idx = WeaviateIndexer()  # заглушка для обратной совместимости теста
         texts = test_chunks['text'].tolist()
         embeddings = faiss_idx.create_embeddings(texts, show_progress=False)
         faiss_idx.build_faiss_index(embeddings)

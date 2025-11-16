@@ -152,12 +152,11 @@ class StreamingDocumentProcessor:
                              indexer = None,
                              for_weaviate: bool = False) -> Optional[pd.DataFrame]:
         """
-        Потоковая обработка CSV:
+        Потоковая обработка CSV (режим Weaviate):
         - Читает по csv_chunksize документов за раз
         - Обрабатывает каждый: preprocess → llm_clean → chunk
         - Накапливает чанки в батчи
-        - Для Weaviate: индексирует батчи сразу и очищает память
-        - Для FAISS: возвращает все чанки в конце
+        - Индексирует батчи сразу в Weaviate и очищает память
 
         Args:
             csv_path: путь к websites.csv
@@ -170,7 +169,7 @@ class StreamingDocumentProcessor:
         self.logger.info("="*80)
         self.logger.info("ПОТОКОВАЯ ОБРАБОТКА ДОКУМЕНТОВ")
         self.logger.info("="*80)
-        self.logger.info(f"Режим: {'Weaviate (streaming index)' if for_weaviate else 'FAISS (accumulate all)'}")
+        self.logger.info(f"Режим: Weaviate (streaming index)")
         self.logger.info(f"LLM очистка: {'ВКЛ' if self.llm_clean else 'ВЫКЛ'}")
         if self.llm_clean:
             self.logger.info(f"Порог полезности: {self.min_usefulness}")
@@ -185,10 +184,6 @@ class StreamingDocumentProcessor:
         total_docs_filtered = 0
         total_chunks_created = 0
         batches_indexed = 0
-
-        # Подсчитаем общее количество документов для прогресса
-        total_docs = sum(1 for _ in open(csv_path, encoding='utf-8')) - 1  # -1 для header
-        self.logger.info(f"Всего документов в CSV: {total_docs}")
 
         # Читаем CSV по частям (streaming)
         csv_reader = pd.read_csv(csv_path, chunksize=self.csv_chunksize)
@@ -234,14 +229,15 @@ class StreamingDocumentProcessor:
                         if TORCH_AVAILABLE and torch.cuda.is_available():
                             torch.cuda.empty_cache()
                     else:
-                        # FAISS: накапливаем все чанки
-                        all_chunks.extend(chunk_batch)
-                        chunk_batch = []
+                        raise RuntimeError("Ожидался режим Weaviate с активным indexer")
 
-            # Прогресс
-            self.logger.info(f"  Прогресс: {total_docs_processed}/{total_docs} документов | "
-                           f"Чанков создано: {total_chunks_created} | "
-                           f"Отфильтровано: {total_docs_filtered}")
+            # Прогресс (общее количество документов считаем по мере обработки,
+            # так как CSV может содержать переводы строк внутри текста)
+            self.logger.info(
+                f"  Прогресс: {total_docs_processed} документов | "
+                f"Чанков создано: {total_chunks_created} | "
+                f"Отфильтровано: {total_docs_filtered}"
+            )
 
         # Обработка остатка
         if chunk_batch:
@@ -256,7 +252,7 @@ class StreamingDocumentProcessor:
                 all_chunks.extend(chunk_batch)
                 del batch_df
             else:
-                all_chunks.extend(chunk_batch)
+                raise RuntimeError("Ожидался режим Weaviate с активным indexer")
 
         # Итоговая статистика
         self.logger.info("\n" + "="*80)
@@ -272,7 +268,7 @@ class StreamingDocumentProcessor:
 
         self.logger.info("="*80)
 
-        # Конвертируем в DataFrame (для обоих режимов)
+        # Конвертируем в DataFrame
         if all_chunks:
             chunks_df = pd.DataFrame(all_chunks)
             self.logger.info(f"DataFrame создан: {len(chunks_df)} строк")

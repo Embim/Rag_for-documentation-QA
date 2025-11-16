@@ -86,7 +86,7 @@ class HybridRetriever:
                  use_query_expansion: bool = ENABLE_QUERY_EXPANSION):
         """
         Args:
-            embedding_indexer: векторный индексер (WeaviateIndexer или EmbeddingIndexer)
+            embedding_indexer: векторный индексер (WeaviateIndexer)
             bm25_indexer: BM25 индексер
             alpha: вес для dense поиска (1-alpha для BM25)
             use_query_expansion: использовать ли расширение запроса
@@ -96,8 +96,8 @@ class HybridRetriever:
         self.alpha = alpha
         self.use_query_expansion = use_query_expansion
 
-        # Определяем тип индексера
-        self.is_weaviate = hasattr(embedding_indexer, 'collection')
+        # Тип индексера: используем только Weaviate
+        self.is_weaviate = True
 
         # Инициализация Query Expander (если нужно)
         self.query_expander = None
@@ -219,23 +219,7 @@ class HybridRetriever:
                 all_results.append(results_df)
 
             else:
-                # FAISS режим - делаем как раньше
-                # 1. Векторный поиск
-                query_embedding = self.embedding_indexer.model.encode([q])[0]
-                dense_scores, dense_indices = self.embedding_indexer.search(
-                    query_embedding, k=k_dense
-                )
-
-                # 2. BM25 поиск
-                bm25_scores, bm25_indices = self.bm25_indexer.search(q, k=k_bm25)
-
-                # 3. Объединение результатов
-                results = self._merge_results(
-                    dense_scores, dense_indices,
-                    bm25_scores, bm25_indices
-                )
-
-                all_results.append(results)
+                raise RuntimeError("Поддерживается только Weaviate режим")
 
         # Объединяем результаты от разных вариантов запроса
         if len(all_results) == 1:

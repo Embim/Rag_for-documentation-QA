@@ -19,10 +19,8 @@ def setup_logging(level: str = "INFO",
     Не создает дубликатов хендлеров при повторных вызовах.
     """
     root = logging.getLogger()
-    if root.handlers:
-        # Уже настроен
-        return
 
+    # Всегда выставляем уровень (мог быть переопределён сторонними либами)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
     # Форматтеры
@@ -43,19 +41,28 @@ def setup_logging(level: str = "INFO",
     if log_file is None:
         log_file = OUTPUTS_DIR / "pipeline.log"
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        str(log_file), maxBytes=25 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    # Добавляем файловый хендлер, только если ещё нет хендлера на этот файл
+    file_handler_exists = any(
+        isinstance(h, logging.handlers.RotatingFileHandler) and getattr(h, 'baseFilename', None) == str(log_file)
+        for h in root.handlers
     )
-    file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-    file_handler.setFormatter(file_fmt)
-    root.addHandler(file_handler)
+    if not file_handler_exists:
+        file_handler = logging.handlers.RotatingFileHandler(
+            str(log_file), maxBytes=25 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+        file_handler.setFormatter(file_fmt)
+        root.addHandler(file_handler)
 
     # Консоль
     if enable_console:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-        console_handler.setFormatter(console_fmt)
-        root.addHandler(console_handler)
+        # Не дублируем консольный хендлер
+        console_exists = any(isinstance(h, logging.StreamHandler) for h in root.handlers)
+        if not console_exists:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+            console_handler.setFormatter(console_fmt)
+            root.addHandler(console_handler)
 
 
 def get_logger(name: str) -> logging.Logger:

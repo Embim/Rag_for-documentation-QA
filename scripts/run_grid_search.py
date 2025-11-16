@@ -28,7 +28,7 @@ from src.config import (
     GRID_SEARCH_USE_LLM
 )
 from src.preprocessing import load_and_preprocess_questions
-from src.indexing import BM25Indexer, EmbeddingIndexer, WeaviateIndexer
+from src.indexing import BM25Indexer, WeaviateIndexer
 from src.retrieval import HybridRetriever
 from src.grid_search_optimizer import optimize_rag_params
 from src.logger import setup_logging, get_logger, log_timing
@@ -51,38 +51,16 @@ def load_indexes():
     chunks_df = pd.read_pickle(chunks_path)
     logger.info(f"Загружено {len(chunks_df)} чанков")
 
-    # Определяем режим работы
-    use_weaviate = USE_WEAVIATE
-
-    if use_weaviate:
-        logger.info("Используется Weaviate (векторный поиск + BM25)")
-        try:
-            embedding_indexer = WeaviateIndexer()
-            embedding_indexer.chunk_metadata = chunks_df
-            bm25_indexer = None
-            logger.info("✓ Подключено к Weaviate")
-        except Exception as e:
-            logger.error(f"Не удалось подключиться к Weaviate: {e}")
-            logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
-            sys.exit(1)
-    else:
-        logger.info("Используется FAISS для векторного поиска")
-        faiss_path = MODELS_DIR / "faiss.index"
-        bm25_path = MODELS_DIR / "bm25.pkl"
-
-        if not faiss_path.exists() or not bm25_path.exists():
-            logger.error("ОШИБКА: FAISS или BM25 индекс не найден!")
-            logger.error("Сначала выполните: python main_pipeline.py build")
-            sys.exit(1)
-
-        # Загрузка BM25
-        bm25_indexer = BM25Indexer()
-        bm25_indexer.load_index(str(bm25_path))
-
-        # Загрузка FAISS
-        embedding_indexer = EmbeddingIndexer()
-        embedding_indexer.load_index(str(faiss_path))
+    logger.info("Используется Weaviate (векторный поиск + BM25)")
+    try:
+        embedding_indexer = WeaviateIndexer()
         embedding_indexer.chunk_metadata = chunks_df
+        bm25_indexer = None
+        logger.info("✓ Подключено к Weaviate")
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к Weaviate: {e}")
+        logger.info("Убедитесь что Weaviate запущен: docker-compose up -d")
+        sys.exit(1)
 
     return embedding_indexer, bm25_indexer
 
