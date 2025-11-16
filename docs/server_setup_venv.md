@@ -71,7 +71,7 @@ pip install -r requirements.txt
 
 ```bash
 pip install torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/cu121
+  --index-url https://download.pytorch.org/whl/cu124
 ```
 
 - **Вариант 2: другой CUDA wheel (пример для CUDA 12.4)**  
