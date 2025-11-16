@@ -490,7 +490,9 @@ SEARCH (поиск ответов):
   python main_pipeline.py search                          # Обработать все вопросы
   python main_pipeline.py search --limit 10               # Тест на 10 вопросах
   python main_pipeline.py search --optimize               # С оптимизацией параметров (grid search)
-  python main_pipeline.py search --optimize --optimize-mode full  # Полная оптимизация
+  python main_pipeline.py search --optimize --optimize-mode test  # Тест (5 комбинаций)
+  python main_pipeline.py search --optimize --optimize-mode quick  # Быстрая оптимизация (54 комбинации)
+  python main_pipeline.py search --optimize --optimize-mode full  # Полная оптимизация (1225 комбинаций)
 
 ALL (полный цикл):
   python main_pipeline.py all                             # Build + Search
@@ -551,8 +553,8 @@ EVALUATE:
         '--optimize-mode',
         type=str,
         default=None,
-        choices=['quick', 'full'],
-        help='Режим grid search: quick или full (по умолчанию из config.GRID_SEARCH_MODE)'
+        choices=['test', 'quick', 'full'],
+        help='Режим grid search: test (5 комбинаций), quick (54 комбинации) или full (1225 комбинаций) (по умолчанию из config.GRID_SEARCH_MODE)'
     )
     parser_search.set_defaults(func=cmd_search)
 
