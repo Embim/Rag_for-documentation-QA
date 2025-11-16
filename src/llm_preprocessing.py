@@ -296,7 +296,7 @@ class LLMDocumentCleanerAPI:
         
         # Сокращенный промпт
         text_truncated = text_preprocessed[:2500]
-        prompt = f"""Очисти банковский документ и верни JSON:
+        prompt = f"""Очисти банковский документ и верни ТОЛЬКО валидный JSON без markdown блоков и дополнительного текста.
 
 ДОКУМЕНТ:
 {text_truncated}
@@ -307,7 +307,8 @@ class LLMDocumentCleanerAPI:
 3. Темы (макс 3): кредитные_карты, дебетовые_карты, переводы, жкх, кэшбэк, счета_реквизиты, комиссии, лимиты, безопасность, мобильное_приложение, альфа_онлайн, ипотека, кредиты, вклады, инвестиции, страхование
 4. Полезность: 0.0-0.3 (мусор), 0.4-0.6 (частично), 0.7-1.0 (конкретика)
 
-JSON:
+ВАЖНО: Верни ТОЛЬКО JSON объект, без markdown блоков (```json), без дополнительного текста до или после JSON.
+
 {{
   "clean_text": "очищенный текст",
   "topics": ["тема_1", "тема_2"],
@@ -323,16 +324,35 @@ JSON:
                 
                 # Удаляем markdown код-блоки (```json ... ```)
                 # Модели часто возвращают JSON в markdown формате
-                # Стратегия: ищем содержимое между ```json и ```
-                json_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', response_text, re.DOTALL)
+                # Важно: обрабатываем из raw_response, т.к. _extract_final_answer мог удалить часть текста
+                
+                # Сначала пробуем извлечь из raw_response (оригинальный ответ)
+                text_to_parse = raw_response
+                
+                # Стратегия 1: ищем содержимое между ```json и ``` (с учетом переносов строк и без них)
+                # Используем нежадный поиск с DOTALL для захвата многострочного JSON
+                json_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text_to_parse, re.DOTALL)
                 if json_block_match:
                     # Извлекаем содержимое из markdown блока
-                    response_text = json_block_match.group(1).strip()
-                elif response_text.strip().startswith('```'):
-                    # Fallback: если формат немного другой, просто удаляем маркеры
-                    response_text = re.sub(r'^```(?:json)?\s*\n?', '', response_text, flags=re.MULTILINE)
-                    response_text = re.sub(r'\n?```\s*$', '', response_text, flags=re.MULTILINE)
-                    response_text = response_text.strip()
+                    text_to_parse = json_block_match.group(1).strip()
+                elif '```' in text_to_parse:
+                    # Стратегия 2: если есть ``` но не нашли полный блок, пробуем извлечь между первыми и последними ```
+                    parts = text_to_parse.split('```')
+                    if len(parts) >= 3:
+                        # Берем содержимое между первым и последним ```
+                        text_to_parse = '```'.join(parts[1:-1]).strip()
+                        # Удаляем возможные префиксы типа "json"
+                        text_to_parse = re.sub(r'^(?:json|JSON)\s*\n?', '', text_to_parse, flags=re.MULTILINE)
+                elif text_to_parse.strip().startswith('```'):
+                    # Стратегия 3: если текст начинается с ```, просто удаляем маркеры
+                    text_to_parse = re.sub(r'^```(?:json)?\s*\n?', '', text_to_parse, flags=re.MULTILINE)
+                    text_to_parse = re.sub(r'\n?```\s*$', '', text_to_parse, flags=re.MULTILINE)
+                    text_to_parse = text_to_parse.strip()
+                else:
+                    # Если markdown блоков нет, используем очищенный ответ
+                    text_to_parse = response_text
+                
+                response_text = text_to_parse
                 
                 # Парсинг JSON (улучшенная логика с обработкой reasoning)
                 raw_result = None
