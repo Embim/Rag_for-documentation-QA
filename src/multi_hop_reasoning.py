@@ -27,6 +27,7 @@ Multi-hop Reasoning - итеративный поиск для сложных в
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from llama_cpp import Llama
+import requests
 from src.logger import get_logger, log_timing
 
 
@@ -51,19 +52,38 @@ class MultiHopReasoner:
         self.max_hops = max_hops
 
         self.logger = get_logger(__name__)
-        self.logger.info(f"[MultiHop] Загрузка LLM для multi-hop reasoning: {llm_model_path}")
 
-        from src.config import LLM_CONTEXT_SIZE, LLM_GPU_LAYERS
-
-        self.llm = Llama(
-            model_path=llm_model_path,
-            n_ctx=LLM_CONTEXT_SIZE,
-            n_gpu_layers=LLM_GPU_LAYERS,
-            n_batch=512,
-            verbose=False
+        from src.config import (
+            LLM_CONTEXT_SIZE,
+            LLM_GPU_LAYERS,
+            LLM_MODE,
+            OPENROUTER_API_KEY,
+            OPENROUTER_MODEL,
+            LLM_API_MAX_TOKENS
         )
 
-        self.logger.info(f"[MultiHop] Инициализирован (max_hops={max_hops})")
+        self.use_api = (LLM_MODE == "api")
+
+        if self.use_api:
+            # API режим - не загружаем локальную модель
+            self.llm = None
+            self.model = OPENROUTER_MODEL
+            self.api_key = OPENROUTER_API_KEY
+            self.max_tokens = LLM_API_MAX_TOKENS
+            self.logger.info(f"[MultiHop] API режим (модель: {self.model}, max_hops={max_hops})")
+        else:
+            # Локальный режим
+            self.logger.info(f"[MultiHop] Загрузка LLM для multi-hop reasoning: {llm_model_path}")
+
+            self.llm = Llama(
+                model_path=llm_model_path,
+                n_ctx=LLM_CONTEXT_SIZE,
+                n_gpu_layers=LLM_GPU_LAYERS,
+                n_batch=512,
+                verbose=False
+            )
+
+            self.logger.info(f"[MultiHop] Инициализирован (max_hops={max_hops})")
 
     def classify_question_complexity(self, query: str) -> Dict:
         """
@@ -79,6 +99,13 @@ class MultiHopReasoner:
                 'needs_multi_hop': bool
             }
         """
+        if self.use_api:
+            return self._classify_with_api(query)
+        else:
+            return self._classify_with_local_llm(query)
+
+    def _classify_with_local_llm(self, query: str) -> Dict:
+        """Классификация через локальную LLM"""
         prompt = f"""<|im_start|>system
 Ты - эксперт по анализу запросов. Определи сложность вопроса.
 
@@ -130,6 +157,65 @@ class MultiHopReasoner:
                 'reasoning': 'Ошибка классификации, используется default'
             }
 
+    def _classify_with_api(self, query: str) -> Dict:
+        """Классификация через OpenRouter API"""
+        prompt = f"""Ты - эксперт по анализу запросов. Определи сложность вопроса.
+
+Простой (simple): один факт, одна тема
+- "Какая комиссия за перевод?"
+- "Где найти реквизиты?"
+
+Средний (medium): несколько фактов из одной темы
+- "Какие условия и комиссии по Альфа-Карте?"
+
+Сложный (complex): сравнение, несколько тем, требует синтеза
+- "В чем разница между картами?"
+- "Как открыть счет и подключить онлайн-банк?"
+
+Вопрос: {query}
+
+Ответ (одним словом: simple/medium/complex):"""
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 20,
+                    "temperature": 0.1,
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            complexity = result['choices'][0]['message']['content'].strip().lower()
+
+            # Валидация
+            if complexity not in ['simple', 'medium', 'complex']:
+                complexity = 'medium'  # default
+
+            needs_multi_hop = complexity in ['complex']
+
+            return {
+                'complexity': complexity,
+                'needs_multi_hop': needs_multi_hop,
+                'reasoning': f"Вопрос классифицирован как {complexity}"
+            }
+
+        except Exception as e:
+            self.logger.warning(f"[MultiHop] Ошибка API классификации: {e}")
+            return {
+                'complexity': 'medium',
+                'needs_multi_hop': False,
+                'reasoning': 'Ошибка классификации, используется default'
+            }
+
     def generate_sub_queries(self, query: str, hop_number: int,
                             previous_results: List[Dict] = None) -> List[str]:
         """
@@ -143,6 +229,14 @@ class MultiHopReasoner:
         Returns:
             список подзапросов для этой итерации
         """
+        if self.use_api:
+            return self._generate_sub_queries_with_api(query, hop_number, previous_results)
+        else:
+            return self._generate_sub_queries_with_local_llm(query, hop_number, previous_results)
+
+    def _generate_sub_queries_with_local_llm(self, query: str, hop_number: int,
+                                            previous_results: List[Dict] = None) -> List[str]:
+        """Генерация подзапросов через локальную LLM"""
         if hop_number == 1:
             # Первая итерация - декомпозиция основного вопроса
             prompt = f"""<|im_start|>system
@@ -203,6 +297,72 @@ class MultiHopReasoner:
             self.logger.warning(f"[MultiHop] Ошибка генерации подзапросов: {e}")
             return [query]  # fallback
 
+    def _generate_sub_queries_with_api(self, query: str, hop_number: int,
+                                      previous_results: List[Dict] = None) -> List[str]:
+        """Генерация подзапросов через OpenRouter API"""
+        if hop_number == 1:
+            # Первая итерация - декомпозиция основного вопроса
+            prompt = f"""Разбей сложный вопрос на 2-3 простых подвопроса для поиска информации.
+
+Вопрос: {query}
+
+Подвопросы (по одному на строку, без нумерации):"""
+        else:
+            # Последующие итерации - дополнительные запросы на основе найденного
+            prev_summary = self._summarize_previous_results(previous_results)
+
+            prompt = f"""Определи, какая информация еще нужна для полного ответа на вопрос.
+
+Основной вопрос: {query}
+
+Уже найдено: {prev_summary}
+
+Дополнительные запросы (1-2 штуки, по одному на строку):"""
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 200,
+                    "temperature": 0.3,
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            result_text = result['choices'][0]['message']['content'].strip()
+
+            # Парсим подзапросы
+            sub_queries = []
+            for line in result_text.split('\n'):
+                line = line.strip()
+                if line and len(line) > 5:  # минимальная длина запроса
+                    # Убираем нумерацию если есть
+                    if line[0].isdigit() and '.' in line:
+                        line = line.split('.', 1)[-1].strip()
+                    sub_queries.append(line)
+
+            # Ограничиваем количество
+            max_sub_queries = 3 if hop_number == 1 else 2
+            sub_queries = sub_queries[:max_sub_queries]
+
+            if len(sub_queries) == 0:
+                # Если LLM не сгенерировал подзапросы, используем исходный
+                sub_queries = [query]
+
+            return sub_queries
+
+        except Exception as e:
+            self.logger.warning(f"[MultiHop] Ошибка API генерации подзапросов: {e}")
+            return [query]  # fallback
+
     def _summarize_previous_results(self, results: List[Dict]) -> str:
         """
         Краткая сводка предыдущих результатов
@@ -246,6 +406,13 @@ class MultiHopReasoner:
                 'reasoning': 'Нет результатов'
             }
 
+        if self.use_api:
+            return self._check_completeness_with_api(query, all_results)
+        else:
+            return self._check_completeness_with_local_llm(query, all_results)
+
+    def _check_completeness_with_local_llm(self, query: str, all_results: List[pd.DataFrame]) -> Dict:
+        """Проверка полноты через локальную LLM"""
         # Собираем топ результаты
         top_texts = []
         for results_df in all_results:
@@ -288,6 +455,62 @@ class MultiHopReasoner:
 
         except Exception as e:
             self.logger.warning(f"[MultiHop] Ошибка проверки полноты: {e}")
+            return {
+                'is_complete': len(all_results) >= 2,  # эвристика
+                'confidence': 0.5,
+                'reasoning': 'Эвристическая оценка'
+            }
+
+    def _check_completeness_with_api(self, query: str, all_results: List[pd.DataFrame]) -> Dict:
+        """Проверка полноты через OpenRouter API"""
+        # Собираем топ результаты
+        top_texts = []
+        for results_df in all_results:
+            for idx, row in results_df.head(3).iterrows():
+                text = row.get('clean_text', row.get('text', ''))
+                top_texts.append(text[:200])
+
+        context = "\n\n".join(top_texts)
+
+        prompt = f"""Оцени, достаточно ли информации для ответа на вопрос. Ответ: да/нет.
+
+Вопрос: {query}
+
+Найденная информация:
+{context}
+
+Достаточно ли информации? (да/нет):"""
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 10,
+                    "temperature": 0.1,
+                }
+            )
+            response.raise_for_status()
+            result_data = response.json()
+
+            result = result_data['choices'][0]['message']['content'].strip().lower()
+
+            is_complete = 'да' in result or 'yes' in result
+
+            return {
+                'is_complete': is_complete,
+                'confidence': 0.8 if is_complete else 0.3,
+                'reasoning': f"LLM оценка: {result}"
+            }
+
+        except Exception as e:
+            self.logger.warning(f"[MultiHop] Ошибка API проверки полноты: {e}")
             return {
                 'is_complete': len(all_results) >= 2,  # эвристика
                 'confidence': 0.5,

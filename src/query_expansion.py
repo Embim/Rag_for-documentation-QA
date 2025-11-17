@@ -4,12 +4,17 @@
 from llama_cpp import Llama
 from pathlib import Path
 from typing import List
+import requests
 
 from src.config import (
     LLM_MODEL_FILE,
     LLM_CONTEXT_SIZE,
     LLM_GPU_LAYERS,
-    MODELS_DIR
+    MODELS_DIR,
+    LLM_MODE,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
+    LLM_API_MAX_TOKENS
 )
 from src.logger import get_logger
 
@@ -38,24 +43,34 @@ class QueryExpander:
             use_llm: использовать ли LLM для расширения (или только словарь)
         """
         self.use_llm = use_llm
+        self.use_api = (LLM_MODE == "api")
 
         self.logger = get_logger(__name__)
 
         if use_llm:
-            if model_path is None:
-                model_path = str(MODELS_DIR / LLM_MODEL_FILE)
+            if self.use_api:
+                # API режим - не загружаем локальную модель
+                self.llm = None
+                self.model = OPENROUTER_MODEL
+                self.api_key = OPENROUTER_API_KEY
+                self.max_tokens = LLM_API_MAX_TOKENS
+                self.logger.info(f"Query Expansion: API режим (модель: {self.model})")
+            else:
+                # Локальный режим
+                if model_path is None:
+                    model_path = str(MODELS_DIR / LLM_MODEL_FILE)
 
-            self.logger.info(f"Загрузка LLM для Query Expansion: {model_path}")
+                self.logger.info(f"Загрузка LLM для Query Expansion: {model_path}")
 
-            self.llm = Llama(
-                model_path=model_path,
-                n_ctx=LLM_CONTEXT_SIZE,
-                n_gpu_layers=LLM_GPU_LAYERS,
-                n_batch=512,
-                verbose=False
-            )
+                self.llm = Llama(
+                    model_path=model_path,
+                    n_ctx=LLM_CONTEXT_SIZE,
+                    n_gpu_layers=LLM_GPU_LAYERS,
+                    n_batch=512,
+                    verbose=False
+                )
 
-            self.logger.info("LLM загружена успешно")
+                self.logger.info("LLM загружена успешно")
         else:
             self.llm = None
             self.logger.info("Query Expansion: только словарь синонимов")
@@ -92,7 +107,17 @@ class QueryExpander:
         Returns:
             список вариантов запроса
         """
-        if not self.use_llm or self.llm is None:
+        if not self.use_llm:
+            return [query]
+
+        if self.use_api:
+            return self._expand_with_api(query)
+        else:
+            return self._expand_with_local_llm(query)
+
+    def _expand_with_local_llm(self, query: str) -> List[str]:
+        """Расширение через локальную LLM"""
+        if self.llm is None:
             return [query]
 
         prompt = f"""<|im_start|>system
@@ -130,6 +155,51 @@ class QueryExpander:
 
         except Exception as e:
             self.logger.warning(f"Ошибка LLM expansion: {e}")
+            return [query]
+
+    def _expand_with_api(self, query: str) -> List[str]:
+        """Расширение через OpenRouter API"""
+        prompt = f"""Ты - эксперт по банковским запросам. Перефразируй вопрос 3 способами, используя разные формулировки и синонимы.
+
+Вопрос: {query}
+
+Варианты (по одному на строку):
+1."""
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 200,
+                    "temperature": 0.3,
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            result_text = result['choices'][0]['message']['content'].strip()
+
+            # Парсим варианты
+            variants = [query]  # Исходный
+            for line in result_text.split('\n'):
+                line = line.strip()
+                # Убираем нумерацию
+                if line and line[0].isdigit():
+                    variant = line.split('.', 1)[-1].strip()
+                    if variant:
+                        variants.append(variant)
+
+            return variants[:4]  # Макс 4 варианта
+
+        except Exception as e:
+            self.logger.warning(f"Ошибка API expansion: {e}")
             return [query]
 
     def expand_query(self, query: str, method: str = "hybrid") -> List[str]:
